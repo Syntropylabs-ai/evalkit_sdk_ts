@@ -11,7 +11,7 @@ export interface HapiPluginOptions {
  *
  * @example
  * import Hapi from '@hapi/hapi';
- * import evalkit from '@evalkit/sdk';
+ * import evalkit from 'syntropylabs-evalkit';
  *
  * evalkit.init({ subscriptionKey: '...', serviceName: 'my-api' });
  * const server = Hapi.server({ port: 3000 });

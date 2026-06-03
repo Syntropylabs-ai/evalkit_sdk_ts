@@ -12,7 +12,7 @@ export interface HonoMiddlewareOptions {
  *
  * @example
  * import { Hono } from 'hono';
- * import evalkit from '@evalkit/sdk';
+ * import evalkit from 'syntropylabs-evalkit';
  *
  * evalkit.init({ subscriptionKey: '...', serviceName: 'my-api' });
  * const app = new Hono();

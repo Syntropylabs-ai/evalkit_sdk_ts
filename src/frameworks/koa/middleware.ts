@@ -11,7 +11,7 @@ export interface KoaMiddlewareOptions {
  *
  * @example
  * import Koa from 'koa';
- * import evalkit from '@evalkit/sdk';
+ * import evalkit from 'syntropylabs-evalkit';
  *
  * evalkit.init({ subscriptionKey: '...', serviceName: 'my-api' });
  * const app = new Koa();

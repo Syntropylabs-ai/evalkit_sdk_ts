@@ -210,7 +210,7 @@ function scoreContextualRecall(
  * span to the trace service so they appear alongside trace data.
  *
  * @example
- * import { evaluate } from '@evalkit/sdk';
+ * import { evaluate } from 'syntropylabs-evalkit';
  *
  * const result = evaluate({
  *   output: 'The answer is AWS and Azure.',
