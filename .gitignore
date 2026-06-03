@@ -1,0 +1,79 @@
+# Node.js
+/dist
+/node_modules
+/build
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+*.egg-info/
+dist/
+*.egg
+
+# Logs
+logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tests
+/coverage
+/.nyc_output
+.pytest_cache/
+htmlcov/
+
+# IDEs
+/.idea
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Environment
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Temp
+.temp
+.tmp
+
+# Runtime
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Reports
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Keys
+GCPkey.json
+src/storage/GCPkey.json
+*.pem
+*.key
+
+

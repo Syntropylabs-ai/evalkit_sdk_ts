@@ -1,0 +1,112 @@
+# EvalKit TypeScript SDK
+
+OpenTelemetry-based LLM observability, tracing, and evaluation for Node.js — by [Syntropy Labs](https://syntropylabs.ai).
+
+One `init()` call auto-instruments your LLM providers (OpenAI, Anthropic, Bedrock, Cohere, Google, Vertex, LangChain), databases (Postgres, MySQL, MongoDB, Redis), and HTTP clients — then ships traces to the EvalKit platform.
+
+> The Python SDK is published as [`syntropylabs-evalkit`](https://pypi.org/project/syntropylabs-evalkit/) on PyPI.
+
+## Install
+
+```bash
+npm install syntropylabs-evalkit
+```
+
+Provider SDKs are **optional peer dependencies** — install only what you use:
+
+```bash
+npm install openai @anthropic-ai/sdk
+```
+
+## Quick start
+
+```ts
+import evalkit from "syntropylabs-evalkit";
+
+evalkit.init({
+  apiKey: process.env.EVALKIT_API_KEY,
+  serviceName: "my-service",
+});
+
+// That's it — any OpenAI / Anthropic / DB / HTTP call from here is traced.
+```
+
+> Call `init()` as early as possible (top of your entrypoint, before other imports run requests) so auto-instrumentation can hook the libraries.
+
+## Framework middleware
+
+Each incoming request becomes a root trace, with downstream LLM/DB/HTTP calls nested underneath.
+
+```ts
+import express from "express";
+import evalkit from "syntropylabs-evalkit";
+
+evalkit.init({ apiKey: process.env.EVALKIT_API_KEY, serviceName: "api" });
+
+const app = express();
+app.use(evalkit.expressMiddleware());
+```
+
+Supported adapters: `expressMiddleware()`, `fastifyPlugin()`, `koaMiddleware()`, `honoMiddleware()`, `hapiPlugin()`, and `createNestjsInterceptor()`.
+
+## Manual tracing helpers
+
+```ts
+import evalkit from "syntropylabs-evalkit";
+
+// Wrap a function — input/output captured automatically
+const handler = evalkit.traceFunction("rank-results", rankResults);
+
+// Or open a span by hand
+const span = evalkit.startSpan("embed-documents", { count: 42 });
+try {
+  await embed(docs);
+  span.end("OK");
+} catch (e) {
+  span.end("ERROR");
+  throw e;
+}
+
+// Decorators
+class Service {
+  @evalkit.TraceMethod()
+  async compute() { /* ... */ }
+}
+
+await evalkit.flush(); // force-flush before process exit
+```
+
+## Offline evaluation
+
+```ts
+import { evaluate } from "syntropylabs-evalkit";
+
+const result = await evaluate({
+  input: "What is the capital of France?",
+  output: "Paris",
+  metrics: ["correctness", "relevance"],
+});
+```
+
+## Scenario generation & simulation
+
+```ts
+import evalkit from "syntropylabs-evalkit";
+
+const scenarios = await evalkit.generateScenarios({ /* ... */ });
+const { simulationId, results } = await evalkit.simulateUser({ /* ... */ });
+```
+
+## Configuration
+
+| Option        | Description                                            |
+| ------------- | ------------------------------------------------------ |
+| `apiKey`      | EvalKit project API key (required).                    |
+| `serviceName` | Logical service name attached to every trace.          |
+| `endpoint`    | Override the collector endpoint (defaults to EvalKit). |
+
+See `EvalKitOptions` (exported type) for the full set.
+
+## License
+
+Proprietary — © 2026 Syntropy Labs. See [LICENSE](./LICENSE).

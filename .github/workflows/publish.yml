@@ -1,0 +1,57 @@
+name: Publish TypeScript SDK
+
+# Publishes the EvalKit TypeScript SDK to npm.
+#
+# Triggers:
+#   - Manually from the Actions tab ("Run workflow").
+#   - Automatically when a tag like v0.1.0 is pushed.
+#
+# Setup (one-time):
+#   1. Create an npm "Automation" access token with publish rights for the
+#      `syntropylabs-evalkit` package (npmjs.com -> Access Tokens).
+#   2. In this repo: Settings -> Environments -> create environment `prod`.
+#   3. Add the token as an environment secret named `NPM_TOKEN` under `prod`.
+#
+# Release flow:
+#   - Bump "version" in package.json, commit, then:
+#       git tag v0.1.18 && git push origin v0.1.18
+
+on:
+  workflow_dispatch: {}
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write          # enables npm provenance attestation
+
+jobs:
+  publish:
+    name: Build & publish to npm
+    runs-on: ubuntu-latest
+    environment: prod        # must hold the NPM_TOKEN secret
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Build & minify
+        run: npm run build
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # Provenance requires a public repo + public package. If this repo is
+          # private, remove the line below (publish will fail otherwise).
+          NPM_CONFIG_PROVENANCE: "true"

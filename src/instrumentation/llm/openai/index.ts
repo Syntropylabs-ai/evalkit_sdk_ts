@@ -1,0 +1,220 @@
+import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opentelemetry/api";
+import type { Span, Context as OtelContext } from "@opentelemetry/api";
+import type { EvalKitClient } from "../../../core/client.js";
+import { recordSimToolCall } from "../../../core/simulation.js";
+
+type Messages = Array<{ role: string; content: string | null }>;
+type ToolCall = {
+  id: string;
+  type: string;
+  function: { name: string; arguments: string };
+};
+type ChatCompletion = {
+  id: string;
+  model: string;
+  choices: Array<{
+    message: { content: string | null; tool_calls?: ToolCall[] };
+    finish_reason?: string;
+  }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+};
+type CreateParams = {
+  model?: string;
+  messages?: Messages;
+  system?: string;
+  temperature?: number;
+  max_tokens?: number;
+  top_p?: number;
+  stream?: boolean;
+  tools?: unknown[];
+};
+type Completions = { create: (...args: unknown[]) => Promise<unknown> };
+
+/**
+ * Wraps an OpenAI streaming response (AsyncIterable) in a Proxy so that:
+ * - All original methods are preserved (controller, toReadableStream, tee, etc.)
+ * - Symbol.asyncIterator is overridden to accumulate chunks and end the span
+ *   when the stream is exhausted.
+ */
+function wrapOpenAIStream(stream: any, span: Span): any {
+  let content = '';
+  let tokensIn = 0;
+  let tokensOut = 0;
+  let finished = false;
+
+  function finish(error?: Error) {
+    if (finished) return;
+    finished = true;
+    if (error) {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+    } else {
+      span.setAttributes({
+        'evalkit.completion': content,
+        'gen_ai.usage.input_tokens': tokensIn,
+        'gen_ai.usage.output_tokens': tokensOut,
+        'gen_ai.streaming': true,
+      });
+      span.setStatus({ code: SpanStatusCode.OK });
+    }
+    span.end();
+  }
+
+  return new Proxy(stream, {
+    get(target: any, prop: string | symbol, receiver: any) {
+      if (prop === Symbol.asyncIterator) {
+        return function () {
+          const iter = target[Symbol.asyncIterator]();
+          return {
+            async next() {
+              try {
+                const result = await iter.next();
+                if (!result.done && result.value) {
+                  const chunk = result.value;
+                  const delta = chunk.choices?.[0]?.delta?.content;
+                  if (delta) content += delta;
+                  if (chunk.usage) {
+                    tokensIn = chunk.usage.prompt_tokens ?? 0;
+                    tokensOut = chunk.usage.completion_tokens ?? 0;
+                  }
+                }
+                if (result.done) finish();
+                return result;
+              } catch (err: any) {
+                finish(err instanceof Error ? err : new Error(String(err)));
+                throw err;
+              }
+            },
+            return() {
+              finish();
+              return iter.return?.() ?? Promise.resolve({ done: true, value: undefined });
+            },
+            throw(err?: any) {
+              finish(err instanceof Error ? err : new Error(String(err)));
+              return iter.throw?.(err) ?? Promise.reject(err);
+            },
+            [Symbol.asyncIterator]() { return this; },
+          };
+        };
+      }
+      const val = Reflect.get(target, prop, receiver);
+      return typeof val === 'function' ? val.bind(target) : val;
+    },
+  });
+}
+
+export function patchOpenAI(
+  client: EvalKitClient,
+  completions: Completions,
+  parentCtx?: OtelContext,
+  system: string = "openai"
+): void {
+  if ((completions.create as { __evalkit?: boolean }).__evalkit) return;
+
+  const original = completions.create;
+
+  completions.create = async function (this: unknown, ...args: unknown[]): Promise<unknown> {
+    const params = args[0] as CreateParams;
+    const ctx = parentCtx ?? otelContext.active();
+
+    const span = client.tracer.startSpan(
+      "chat.completions.create",
+      {
+        kind: SpanKind.CLIENT,
+        attributes: {
+          "evalkit.span_type": "llm_call",
+          "gen_ai.system": system,
+          "gen_ai.request.model": params.model ?? "unknown",
+          ...(params.temperature != null && { "gen_ai.request.temperature": params.temperature }),
+          ...(params.max_tokens != null && { "gen_ai.request.max_tokens": params.max_tokens }),
+          ...(params.top_p != null && { "gen_ai.request.top_p": params.top_p }),
+          "evalkit.prompt": messagesToText(params.messages ?? []),
+        },
+      },
+      ctx
+    );
+
+    const spanCtx = trace.setSpan(ctx, span);
+
+    // Streaming path — wrap the stream to accumulate content and end span on exhaustion
+    if (params?.stream) {
+      let stream: unknown;
+      try {
+        stream = await otelContext.with(spanCtx, () => original.apply(this, args));
+      } catch (err) {
+        span.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: err instanceof Error ? err.message : String(err),
+        });
+        span.end();
+        throw err;
+      }
+      return wrapOpenAIStream(stream, span);
+    }
+
+    let result: ChatCompletion;
+    try {
+      result = (await otelContext.with(spanCtx, () => original.apply(this, args))) as ChatCompletion;
+    } catch (err) {
+      span.setStatus({
+        code: SpanStatusCode.ERROR,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      span.end();
+      throw err;
+    }
+
+    const choice = result.choices?.[0];
+    const completion = choice?.message.content ?? "";
+
+    span.setAttributes({
+      "gen_ai.response.model": result.model,
+      "gen_ai.response.id": result.id,
+      "gen_ai.usage.input_tokens": result.usage?.prompt_tokens ?? 0,
+      "gen_ai.usage.output_tokens": result.usage?.completion_tokens ?? 0,
+      "gen_ai.usage.total_tokens": result.usage?.total_tokens ?? 0,
+      "gen_ai.response.finish_reasons": choice?.finish_reason ? [choice.finish_reason] : [],
+      "evalkit.completion": completion,
+    });
+
+    for (const tc of choice?.message.tool_calls ?? []) {
+      span.addEvent("gen_ai.tool.call", {
+        "gen_ai.tool.call.id": tc.id,
+        "gen_ai.tool.name": tc.function.name,
+        "gen_ai.tool.call.arguments": tc.function.arguments,
+      });
+      try {
+        let parsedArgs: Record<string, unknown> | undefined;
+        try { parsedArgs = JSON.parse(tc.function.arguments); } catch { /* keep undefined */ }
+        recordSimToolCall(span.spanContext().traceId, tc.function.name, parsedArgs);
+      } catch { /* never break tracing */ }
+      // Auto tool span — the model's tool request, nested under this LLM call.
+      // No user code needed; for execution timing, wrap the tool with traceFunction.
+      const toolSpan = client.tracer.startSpan(
+        tc.function.name,
+        {
+          kind: SpanKind.INTERNAL,
+          attributes: {
+            "evalkit.span_type": "tool_call",
+            "gen_ai.tool.name": tc.function.name,
+            "gen_ai.tool.call.id": tc.id,
+            "gen_ai.tool.call.arguments": tc.function.arguments,
+          },
+        },
+        spanCtx,
+      );
+      toolSpan.end();
+    }
+
+    span.setStatus({ code: SpanStatusCode.OK });
+    span.end();
+    return result;
+  };
+
+  (completions.create as { __evalkit?: boolean }).__evalkit = true;
+}
+
+function messagesToText(messages: Messages): string {
+  return messages
+    .map((m) => `${m.role}: ${m.content ?? ""}`)
+    .join("\n");
+}
