@@ -24,7 +24,10 @@ on:
 
 permissions:
   contents: read
-  id-token: write          # enables npm provenance attestation
+  # Note: provenance is intentionally disabled — npm only supports it for PUBLIC
+  # source repos, and evalkit_sdk_ts is private. If this repo is ever made public,
+  # add `id-token: write` here and `NPM_CONFIG_PROVENANCE: "true"` to the publish
+  # step to enable signed provenance.
 
 jobs:
   publish:
@@ -52,6 +55,3 @@ jobs:
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          # Provenance requires a public repo + public package. If this repo is
-          # private, remove the line below (publish will fail otherwise).
-          NPM_CONFIG_PROVENANCE: "true"

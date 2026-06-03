@@ -2,6 +2,7 @@
 /dist
 /node_modules
 /build
+*.tgz
 npm-debug.log*
 pnpm-debug.log*
 yarn-debug.log*
