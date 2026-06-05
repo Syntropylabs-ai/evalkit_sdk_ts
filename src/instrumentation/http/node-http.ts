@@ -146,6 +146,7 @@ export function patchHttp(client: EvalKitClient): void {
 
       req.on('error', (err: Error) => {
         span.setAttributes({ 'http.status_code': 0, 'error.message': err.message });
+        span.recordException(err instanceof Error ? err : new Error(String(err)));
         span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
         span.end();
       });
@@ -265,6 +266,7 @@ export function patchIncomingHttp(client: EvalKitClient): void {
     });
     res.on('error', (err: Error) => {
       span.setAttribute('error.message', err.message);
+      span.recordException(err instanceof Error ? err : new Error(String(err)));
       span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
       span.end();
     });

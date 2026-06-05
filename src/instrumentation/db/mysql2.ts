@@ -41,6 +41,7 @@ export function patchMysql2(client: EvalKitClient, mysqlInstance: any): void {
         const newArgs = args.slice(0, -1).concat([
           (err: Error | null, rows: any, fields: any) => {
             if (err) {
+              span.recordException(err);
               span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
               span.setAttribute('error.message', err.message);
             } else {
@@ -64,8 +65,10 @@ export function patchMysql2(client: EvalKitClient, mysqlInstance: any): void {
             return [rows, fields];
           },
           (err: any) => {
-            span.setStatus({ code: SpanStatusCode.ERROR, message: err?.message });
-            span.setAttribute('error.message', err?.message ?? String(err));
+            const error = err instanceof Error ? err : new Error(String(err));
+            span.recordException(error);
+            span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+            span.setAttribute('error.message', error.message);
             span.end();
             throw err;
           },

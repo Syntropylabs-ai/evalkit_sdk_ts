@@ -79,10 +79,9 @@ export function patchBedrock(
     try {
       result = (await otelContext.with(spanCtx, () => original.apply(this, args))) as ConverseOutput;
     } catch (err) {
-      span.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: err instanceof Error ? err.message : String(err),
-      });
+      const error = err instanceof Error ? err : new Error(String(err));
+      span.recordException(error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
       span.end();
       throw err;
     }

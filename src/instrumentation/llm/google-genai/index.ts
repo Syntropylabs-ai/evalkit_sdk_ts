@@ -146,7 +146,9 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
       try {
         result = (await otelContext.with(spanCtx, () => original.apply(this, args))) as GenAIResponse;
       } catch (err) {
-        span.setStatus({ code: SpanStatusCode.ERROR, message: err instanceof Error ? err.message : String(err) });
+        const error = err instanceof Error ? err : new Error(String(err));
+        span.recordException(error);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
         span.end();
         throw err;
       }
@@ -190,7 +192,9 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
       try {
         stream = (await otelContext.with(spanCtx, () => original.apply(this, args))) as AsyncIterable<GenAIResponse>;
       } catch (err) {
-        span.setStatus({ code: SpanStatusCode.ERROR, message: err instanceof Error ? err.message : String(err) });
+        const error = err instanceof Error ? err : new Error(String(err));
+        span.recordException(error);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
         span.end();
         throw err;
       }
@@ -220,7 +224,9 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
           });
           span.setStatus({ code: SpanStatusCode.OK });
         } catch (err) {
-          span.setStatus({ code: SpanStatusCode.ERROR, message: err instanceof Error ? err.message : String(err) });
+          const error = err instanceof Error ? err : new Error(String(err));
+          span.recordException(error);
+          span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
           throw err;
         } finally {
           span.end();

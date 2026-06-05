@@ -24,7 +24,7 @@ npm install openai @anthropic-ai/sdk
 import evalkit from "syntropylabs-evalkit";
 
 evalkit.init({
-  apiKey: process.env.EVALKIT_API_KEY,
+  subscriptionKey: process.env.EVALKIT_SUBSCRIPTION_KEY!,
   serviceName: "my-service",
 });
 
@@ -41,7 +41,7 @@ Each incoming request becomes a root trace, with downstream LLM/DB/HTTP calls ne
 import express from "express";
 import evalkit from "syntropylabs-evalkit";
 
-evalkit.init({ apiKey: process.env.EVALKIT_API_KEY, serviceName: "api" });
+evalkit.init({ subscriptionKey: process.env.EVALKIT_SUBSCRIPTION_KEY!, serviceName: "api" });
 
 const app = express();
 app.use(evalkit.expressMiddleware());
@@ -81,10 +81,12 @@ await evalkit.flush(); // force-flush before process exit
 ```ts
 import { evaluate } from "syntropylabs-evalkit";
 
-const result = await evaluate({
-  input: "What is the capital of France?",
-  output: "Paris",
-  metrics: ["correctness", "relevance"],
+// Deterministic, local scoring — runs synchronously, pushed as an eval_result span
+const { scores } = evaluate({
+  output: "The answer is AWS and Azure.",
+  expectedTools: ["search", "summarize"],
+  toolCalls: [{ name: "search" }, { name: "summarize" }],
+  constraints: { requiredTerms: ["AWS", "Azure"] },
 });
 ```
 
@@ -99,13 +101,15 @@ const { simulationId, results } = await evalkit.simulateUser({ /* ... */ });
 
 ## Configuration
 
-| Option        | Description                                            |
-| ------------- | ------------------------------------------------------ |
-| `apiKey`      | EvalKit project API key (required).                    |
-| `serviceName` | Logical service name attached to every trace.          |
-| `endpoint`    | Override the collector endpoint (defaults to EvalKit). |
+| Option             | Description                                                   |
+| ------------------ | ------------------------------------------------------------- |
+| `subscriptionKey`  | EvalKit trace-project subscription key (**required**).        |
+| `serviceName`      | Logical service name attached to every trace.                 |
+| `environment`      | `"development"` \| `"staging"` \| `"production"`.             |
+| `baseUrl`          | Override the trace ingest endpoint (defaults to hosted).      |
+| `apiUrl`           | Override the control-plane endpoint (scenario generation).    |
 
-See `EvalKitOptions` (exported type) for the full set.
+See the exported `EvalKitOptions` type for the full set (`appVersion`, `deviceId`, `debug`, batch tuning).
 
 ## License
 

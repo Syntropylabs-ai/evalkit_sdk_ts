@@ -6,15 +6,15 @@ export function patchErrors(): void {
   process.on('unhandledRejection', (reason: unknown) => {
     const active = trace.getActiveSpan();
     if (!active?.isRecording()) return;
-    const msg = reason instanceof Error ? reason.message : String(reason);
-    const stack = reason instanceof Error ? (reason.stack ?? '') : '';
+    const error = reason instanceof Error ? reason : new Error(String(reason));
     active.addEvent('error.unhandled_rejection', {
-      'error.message': msg,
-      'error.stack': stack,
+      'error.message': error.message,
+      'error.stack': error.stack ?? '',
       'log.level': 'ERROR',
-      'log.message': `UnhandledRejection: ${msg}`,
+      'log.message': `UnhandledRejection: ${error.message}`,
     });
-    active.setStatus({ code: SpanStatusCode.ERROR, message: msg });
+    active.recordException(error);
+    active.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
   });
 
   process.on('uncaughtException', (err: Error) => {
@@ -26,6 +26,7 @@ export function patchErrors(): void {
       'log.level': 'ERROR',
       'log.message': `UncaughtException: ${err.message}`,
     });
+    active.recordException(err);
     active.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
   });
 }

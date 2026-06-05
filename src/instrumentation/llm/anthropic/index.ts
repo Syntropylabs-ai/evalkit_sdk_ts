@@ -57,6 +57,7 @@ function wrapAnthropicStream(stream: any, span: Span): any {
     if (finished) return;
     finished = true;
     if (error) {
+      span.recordException(error);
       span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
     } else {
       span.setAttributes({
@@ -144,10 +145,9 @@ export function patchAnthropic(
       try {
         stream = await otelContext.with(spanCtx, () => original.apply(this, args));
       } catch (err) {
-        span.setStatus({
-          code: SpanStatusCode.ERROR,
-          message: err instanceof Error ? err.message : String(err),
-        });
+        const error = err instanceof Error ? err : new Error(String(err));
+        span.recordException(error);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
         span.end();
         throw err;
       }
@@ -158,10 +158,9 @@ export function patchAnthropic(
     try {
       result = (await otelContext.with(spanCtx, () => original.apply(this, args))) as Message;
     } catch (err) {
-      span.setStatus({
-        code: SpanStatusCode.ERROR,
-        message: err instanceof Error ? err.message : String(err),
-      });
+      const error = err instanceof Error ? err : new Error(String(err));
+      span.recordException(error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
       span.end();
       throw err;
     }

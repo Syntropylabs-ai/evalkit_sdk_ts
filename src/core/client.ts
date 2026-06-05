@@ -7,7 +7,7 @@ import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import type { EvalKitOptions } from "./types.js";
 import { EvalKitExporter } from "./exporter.js";
 
-const SDK_VERSION = "0.1.17";
+const SDK_VERSION = "0.1.20";
 
 const IO_MAX = 4096;
 
@@ -213,14 +213,21 @@ export class EvalKitClient {
       try {
         result = context.with(ctx, () => fn.apply(this, args));
       } catch (err: any) {
-        end('ERROR', { 'error.message': err?.message ?? String(err) });
+        const error = err instanceof Error ? err : new Error(String(err));
+        trace.getSpan(ctx)?.recordException(error);
+        end('ERROR', { 'error.message': error.message });
         throw err;
       }
 
       if (result && typeof result.then === 'function') {
         return result.then(
           (v: any) => { end('OK', captureIO ? { 'function.result': safeIO(v) } : undefined); return v; },
-          (e: any) => { end('ERROR', { 'error.message': e?.message ?? String(e) }); throw e; },
+          (e: any) => {
+            const error = e instanceof Error ? e : new Error(String(e));
+            trace.getSpan(ctx)?.recordException(error);
+            end('ERROR', { 'error.message': error.message });
+            throw e;
+          },
         ) as any;
       }
 

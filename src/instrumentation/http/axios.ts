@@ -96,6 +96,7 @@ export function patchAxios(client: EvalKitClient, axiosInstance: any): void {
           ...(Object.keys(respHeaders).length ? { 'http.response.headers': JSON.stringify(respHeaders) } : {}),
           ...(errBody !== undefined ? { 'http.response.body': errBody } : {}),
         });
+        span.recordException(err instanceof Error ? err : new Error(String(err)));
         span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
         span.end();
       }

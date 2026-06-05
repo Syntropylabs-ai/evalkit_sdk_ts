@@ -34,7 +34,9 @@ export function patchMongoose(client: EvalKitClient, mongoose: any): void {
       span.end();
       return result;
     } catch (err: any) {
-      span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+      const error = err instanceof Error ? err : new Error(String(err));
+      span.recordException(error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
       span.end();
       throw err;
     }
