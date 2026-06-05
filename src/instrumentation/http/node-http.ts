@@ -225,9 +225,30 @@ export function patchIncomingHttp(client: EvalKitClient): void {
     res.setHeader('x-trace-id', spanCtx.traceId);
     res.setHeader('traceparent', `00-${spanCtx.traceId}-${spanCtx.spanId}-01`);
 
+    // Capture the request body by listening to 'data' events on the IncomingMessage stream.
+    // Multiple 'data' listeners are safe — Node.js EventEmitter delivers the same chunks to all.
+    // body-parser (Express/NestJS) will add its own listeners and receive the same data unaffected.
+    const BODY_MAX = 8192;
+    const reqBodyChunks: Buffer[] = [];
+    let reqBodyLen = 0;
+    req.on('data', (chunk: unknown) => {
+      try {
+        if (chunk && reqBodyLen < BODY_MAX) {
+          const b = Buffer.isBuffer(chunk) ? chunk : typeof chunk === 'string' ? Buffer.from(chunk) : null;
+          if (b && b.length) { reqBodyChunks.push(b); reqBodyLen += b.length; }
+        }
+      } catch { /* never affect the request */ }
+    });
+    req.on('end', () => {
+      if (!reqBodyChunks.length) return;
+      try {
+        const raw = Buffer.concat(reqBodyChunks).subarray(0, BODY_MAX).toString('utf-8');
+        if (raw) span.setAttribute('http.request.body', raw);
+      } catch { /* ignore */ }
+    });
+
     // Capture the response body, bounded and pass-through: we only observe a copy of
     // what is written and always forward the original args, so streaming is never altered.
-    const BODY_MAX = 8192;
     const bodyChunks: Buffer[] = [];
     let bodyLen = 0;
     const captureChunk = (chunk: unknown) => {
