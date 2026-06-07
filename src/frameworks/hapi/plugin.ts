@@ -61,7 +61,7 @@ export function createHapiPlugin(
           try {
             const src = request.response?.source ?? request.response?.result;
             if (src !== undefined && src !== null) {
-              responseBody = (typeof src === 'string' ? src : JSON.stringify(src)).slice(0, 4096);
+              responseBody = (typeof src === 'string' ? src : JSON.stringify(src)).slice(0, client.options.maxBodyBytes);
             }
           } catch { /* ignore */ }
           entry.end(sc >= 400 ? 'ERROR' : 'OK', { statusCode: sc, body: responseBody });

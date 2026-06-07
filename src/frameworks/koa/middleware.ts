@@ -46,7 +46,7 @@ export function createKoaMiddleware(
       try {
         const b = ctx.body;
         if (b !== undefined && b !== null) {
-          responseBody = (typeof b === 'string' ? b : JSON.stringify(b)).slice(0, 4096);
+          responseBody = (typeof b === 'string' ? b : JSON.stringify(b)).slice(0, client.options.maxBodyBytes);
         }
       } catch { /* ignore */ }
       end(sc >= 400 ? 'ERROR' : 'OK', { statusCode: sc, body: responseBody });

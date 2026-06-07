@@ -22,6 +22,7 @@ import { createKoaMiddleware } from "./frameworks/koa/middleware.js";
 import { createHonoMiddleware } from "./frameworks/hono/middleware.js";
 import { createHapiPlugin } from "./frameworks/hapi/plugin.js";
 import { EvalKitInterceptor } from "./frameworks/nestjs/interceptor.js";
+import { autoTraceNest as _autoTraceNest } from "./frameworks/nestjs/autotrace.js";
 import { setupAutoInstrumentation } from "./instrumentation/auto.js";
 import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitOptions } from "./core/types.js";
@@ -207,6 +208,17 @@ export function traceFunction<T extends (...args: any[]) => any>(
   return getInstance().traceFunction(name, fn, attributes, captureIO);
 }
 
+/** Wrap your own client-side tool so it traces as a first-class tool_call span
+ *  (Input/Output panels + tool metrics), like server-side / LangChain tools. */
+export function traceTool<T extends (...args: any[]) => any>(
+  name: string,
+  fn: T,
+  attributes?: Record<string, string | number | boolean>,
+  captureIO: boolean = true,
+): T {
+  return getInstance().traceTool(name, fn, attributes, captureIO);
+}
+
 export function TraceMethod(name?: string): MethodDecorator {
   return (target, key, descriptor: any) => {
     const original = descriptor.value;
@@ -241,6 +253,51 @@ export function Traced(options?: { prefix?: string }): ClassDecorator {
     }
     return target;
   };
+}
+
+/**
+ * Trace every function-valued property of an object in place, APM-style — the
+ * parity for Python's `trace_module`. Use it for a service object or a CommonJS
+ * `module.exports` so all its functions are traced with one call:
+ *
+ *   export const orders = traceObject({ place, cancel }, { prefix: 'orders' });
+ */
+export function traceObject<T extends Record<string, any>>(
+  obj: T,
+  options?: { prefix?: string; captureIO?: boolean },
+): T {
+  const inst = getInstance();
+  const prefix = options?.prefix;
+  const captureIO = options?.captureIO ?? true;
+  for (const key of Object.keys(obj)) {
+    const v = (obj as any)[key];
+    if (typeof v === 'function' && !(v as any).__evalkitTraced) {
+      const name = prefix ? `${prefix}.${key}` : key;
+      const wrapped = inst.traceFunction(name, v as any, undefined, captureIO);
+      (wrapped as any).__evalkitTraced = true;
+      (obj as any)[key] = wrapped;
+    }
+  }
+  return obj;
+}
+
+/**
+ * APM-style auto-tracing for a NestJS app — wraps every provider/controller
+ * method so the whole service call tree is traced, no per-class decorators.
+ * NestJS is the one framework with a DI registry the SDK can enumerate; for
+ * other frameworks use `traceObject` / `traceFunction` on your modules.
+ *
+ * Usage (main.ts), after `const app = await NestFactory.create(...)`:
+ *   import { DiscoveryService } from '@nestjs/core';   // requires DiscoveryModule in AppModule
+ *   evalkit.enableNestjsAutoTrace(app.get(DiscoveryService));
+ *
+ * Returns the number of methods wrapped.
+ */
+export function enableNestjsAutoTrace(
+  discovery: { getProviders: () => Array<{ instance?: unknown }>; getControllers: () => Array<{ instance?: unknown }> },
+  options?: { include?: RegExp; captureIO?: boolean },
+): number {
+  return _autoTraceNest(getInstance(), discovery, options);
 }
 
 export function withTrace<T>(ctx: OtelContext, fn: () => Promise<T>): Promise<T> {
@@ -301,8 +358,11 @@ export default {
   startHttpTrace,
   startSpan,
   traceFunction,
+  traceTool,
+  traceObject,
   TraceMethod,
   Traced,
+  enableNestjsAutoTrace,
   withTrace,
   currentTraceId,
   flush,

@@ -42,7 +42,7 @@ export function patchAxios(client: EvalKitClient, axiosInstance: any): void {
           ? { 'http.request.headers': JSON.stringify(reqHeaders) }
           : {}),
         ...(config.data !== undefined
-          ? { 'http.request.body': typeof config.data === 'string' ? config.data.slice(0, 4096) : JSON.stringify(config.data).slice(0, 4096) }
+          ? { 'http.request.body': typeof config.data === 'string' ? config.data.slice(0, client.options.maxBodyBytes) : JSON.stringify(config.data).slice(0, client.options.maxBodyBytes) }
           : {}),
       },
     }, otelContext.active());
@@ -67,7 +67,7 @@ export function patchAxios(client: EvalKitClient, axiosInstance: any): void {
         const respData = response.data;
         let respBody: string | undefined;
         if (respData !== undefined && respData !== null) {
-          respBody = (typeof respData === 'string' ? respData : JSON.stringify(respData)).slice(0, 4096);
+          respBody = (typeof respData === 'string' ? respData : JSON.stringify(respData)).slice(0, client.options.maxBodyBytes);
         }
         span.setAttributes({
           'http.status_code': response.status,
@@ -88,7 +88,7 @@ export function patchAxios(client: EvalKitClient, axiosInstance: any): void {
         const errData = err.response?.data;
         let errBody: string | undefined;
         if (errData !== undefined && errData !== null) {
-          errBody = (typeof errData === 'string' ? errData : JSON.stringify(errData)).slice(0, 4096);
+          errBody = (typeof errData === 'string' ? errData : JSON.stringify(errData)).slice(0, client.options.maxBodyBytes);
         }
         span.setAttributes({
           'http.status_code': sc,

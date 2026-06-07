@@ -54,27 +54,71 @@ Supported adapters: `expressMiddleware()`, `fastifyPlugin()`, `koaMiddleware()`,
 ```ts
 import evalkit from "syntropylabs-evalkit";
 
-// Wrap a function — input/output captured automatically
-const handler = evalkit.traceFunction("rank-results", rankResults);
-
-// Or open a span by hand
-const span = evalkit.startSpan("embed-documents", { count: 42 });
+// Open a span by hand
+const { end } = evalkit.startSpan("embed-documents", { count: 42 });
 try {
   await embed(docs);
-  span.end("OK");
+  end("OK", { "result.count": docs.length });
 } catch (e) {
-  span.end("ERROR");
+  end("ERROR", { "error.message": String(e) });
   throw e;
 }
 
-// Decorators
+await evalkit.flush(); // force-flush before process exit
+```
+
+## Tracing your own functions & tools (APM)
+
+Auto-instrumentation covers libraries (LLM / HTTP / DB). For **your** code, opt in —
+a function, a tool, a class, or a whole service object:
+
+```ts
+import evalkit, { Traced } from "syntropylabs-evalkit";
+
+// One function -> function_call span (input / output / latency)
+const rankResults = evalkit.traceFunction("rank-results", rank);
+
+// One tool -> tool_call span (Input/Output panels + tool metrics)
+const searchWeb = evalkit.traceTool("search_web", (q: string) => runSearch(q));
+
+// Every method of a class, APM-style
+@Traced()
+class OrderService {
+  place(order: Order) { /* ... */ }
+  cancel(id: string)  { /* ... */ }
+}
+
+// Or one method
 class Service {
   @evalkit.TraceMethod()
   async compute() { /* ... */ }
 }
 
-await evalkit.flush(); // force-flush before process exit
+// Every function of a service object (parity with Python's trace_module)
+export const orders = evalkit.traceObject({ place, cancel }, { prefix: "orders" });
 ```
+
+### NestJS — trace the whole app automatically
+
+NestJS exposes a DI registry, so the SDK can wrap **every** provider/controller
+method for you — no per-class decorators. In `main.ts`:
+
+```ts
+import { DiscoveryModule, DiscoveryService } from "@nestjs/core";
+// 1) add DiscoveryModule to your AppModule's imports
+// 2) after the app is created:
+const app = await NestFactory.create(AppModule);
+evalkit.enableNestjsAutoTrace(app.get(DiscoveryService));
+```
+
+> Auto-discovery is only possible where the framework has a registry (NestJS). For
+> Express / Fastify / Koa / Hono / Hapi, use `traceObject` / `traceFunction` on your
+> own modules — incoming HTTP and LLM/DB/HTTP calls are already auto-traced.
+
+> **Client-side tools you run yourself** only show their output if you wrap them with
+> `traceTool` — the SDK sees the model's *request* but never your function's return
+> value. Server-side tools (OpenAI `web_search`, …) and LangChain tools are captured
+> automatically.
 
 ## Offline evaluation
 
@@ -108,6 +152,7 @@ const { simulationId, results } = await evalkit.simulateUser({ /* ... */ });
 | `environment`      | `"development"` \| `"staging"` \| `"production"`.             |
 | `baseUrl`          | Override the trace ingest endpoint (defaults to hosted).      |
 | `apiUrl`           | Override the control-plane endpoint (scenario generation).    |
+| `maxBodyBytes`     | Max captured HTTP request/response body size (default 10 MB). |
 
 See the exported `EvalKitOptions` type for the full set (`appVersion`, `deviceId`, `debug`, batch tuning).
 

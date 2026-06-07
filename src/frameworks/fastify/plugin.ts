@@ -67,8 +67,8 @@ export function createFastifyPlugin(
               activeSpan.setAttribute(
                 'http.request.body',
                 typeof request.body === 'string'
-                  ? request.body.slice(0, 4096)
-                  : JSON.stringify(request.body).slice(0, 4096),
+                  ? request.body.slice(0, client.options.maxBodyBytes)
+                  : JSON.stringify(request.body).slice(0, client.options.maxBodyBytes),
               );
             } catch { }
           }
@@ -83,7 +83,7 @@ export function createFastifyPlugin(
       (request: any, reply: any, payload: any, hookDone: (err: null, payload: any) => void) => {
         try {
           if (payload !== undefined && payload !== null) {
-            const s = (typeof payload === 'string' ? payload : JSON.stringify(payload)).slice(0, 4096);
+            const s = (typeof payload === 'string' ? payload : JSON.stringify(payload)).slice(0, client.options.maxBodyBytes);
             request._evalkitRespBody = s;
           }
         } catch { /* ignore */ }

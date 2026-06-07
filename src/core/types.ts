@@ -79,6 +79,12 @@ export interface EvalKitOptions {
   maxExportBatchSize?: number;
   /** Export interval in ms (default: 5000) */
   scheduledDelayMillis?: number;
+  /**
+   * Max bytes of any captured HTTP request/response body stored on a span
+   * (default: 10 MB). Bodies larger than this are truncated. Applies to the HTTP
+   * client patches (axios/node-http) and all framework middleware.
+   */
+  maxBodyBytes?: number;
   /** deployment environment, e.g. "development" | "staging" | "production" */
   environment?: string;
   /** application version string, e.g. "1.2.3" */

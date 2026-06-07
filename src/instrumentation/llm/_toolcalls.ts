@@ -164,8 +164,14 @@ export function fromLangChainResult(output: any, _ts?: string): NormalizedToolCa
 }
 
 /**
- * Emit normalized tool calls: an event on the LLM span, a child tool_call span,
- * and a simulation record — all consistently for every provider.
+ * Emit normalized tool calls: a gen_ai.tool.call event on the LLM span + a sim
+ * record for every call, plus a child tool_call span ONLY when the SDK has the
+ * tool's result (server-side tools).
+ *
+ * Client-side function tools are run by the application after the LLM call, so the
+ * SDK never sees their result — emitting a child span for those would be a
+ * zero-duration, output-less row. Keep just the event; to trace a client-side
+ * tool's execution (output + latency), wrap it with evalkit.traceFunction.
  */
 export function emitToolCalls(client: EvalKitClient, llmSpan: Span, calls: NormalizedToolCall[]): void {
   if (!calls.length) return;
@@ -181,6 +187,7 @@ export function emitToolCalls(client: EvalKitClient, llmSpan: Span, calls: Norma
     if (c.result != null) eventAttrs["gen_ai.tool.call.result"] = c.result;
     try { llmSpan.addEvent("gen_ai.tool.call", eventAttrs); } catch { /* never break tracing */ }
     try { recordSimToolCall(traceId, c.name, safeParse(c.argsJson)); } catch { /* never break tracing */ }
+    if (c.result == null) continue;  // client-side tool: keep the event only
     try {
       const toolSpan = client.tracer.startSpan(
         c.name,
@@ -191,7 +198,7 @@ export function emitToolCalls(client: EvalKitClient, llmSpan: Span, calls: Norma
             ...eventAttrs,
             "tool.name": c.name,
             "tool.arguments": c.argsJson,
-            ...(c.result != null ? { "tool.result": c.result } : {}),
+            "tool.result": c.result,
           },
         },
         ctx,

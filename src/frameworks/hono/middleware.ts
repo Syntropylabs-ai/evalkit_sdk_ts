@@ -50,7 +50,7 @@ export function createHonoMiddleware(
         // Clone to avoid consuming the original response stream.
         if (c.res && typeof c.res.clone === 'function') {
           const text = await c.res.clone().text();
-          if (text) responseBody = text.slice(0, 4096);
+          if (text) responseBody = text.slice(0, client.options.maxBodyBytes);
         }
       } catch { /* ignore — edge runtimes may restrict clone */ }
       end(sc >= 400 ? 'ERROR' : 'OK', { statusCode: sc, body: responseBody });

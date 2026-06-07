@@ -7,7 +7,7 @@ import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import type { EvalKitOptions } from "./types.js";
 import { EvalKitExporter } from "./exporter.js";
 
-const SDK_VERSION = "0.1.24";
+const SDK_VERSION = "0.1.25";
 
 const IO_MAX = 4096;
 
@@ -48,6 +48,7 @@ export class EvalKitClient {
       debug: false,
       maxExportBatchSize: 512,
       scheduledDelayMillis: 5000,
+      maxBodyBytes: 10 * 1024 * 1024,
       baseUrl: "https://api.syntropylabs.ai",
       apiUrl: "https://api.syntropylabs.ai",
       environment: "",
@@ -232,6 +233,58 @@ export class EvalKitClient {
       }
 
       end('OK', captureIO ? { 'function.result': safeIO(result) } : undefined);
+      return result;
+    } as T;
+  }
+
+  /**
+   * Like traceFunction but emits a first-class tool_call span (renders in the
+   * Input/Output panels and counts toward tool metrics). Use it to wrap your own
+   * client-side tools so they behave like server-side / LangChain tools.
+   */
+  traceTool<T extends (...args: any[]) => any>(
+    name: string,
+    fn: T,
+    attributes?: Record<string, string | number | boolean>,
+    captureIO: boolean = true,
+  ): T {
+    const self = this;
+    return function (this: any, ...args: any[]) {
+      const startAttrs: Record<string, string | number | boolean> = {
+        'evalkit.span_type': 'tool_call',
+        'tool.name': name,
+        'gen_ai.tool.name': name,
+        ...attributes,
+      };
+      if (captureIO && args.length) {
+        startAttrs['tool.arguments'] = safeIO(args.length === 1 ? args[0] : args);
+      }
+
+      const { ctx, end } = self.startSpan(name, startAttrs);
+
+      let result: any;
+      try {
+        result = context.with(ctx, () => fn.apply(this, args));
+      } catch (err: any) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        trace.getSpan(ctx)?.recordException(error);
+        end('ERROR', { 'error.message': error.message });
+        throw err;
+      }
+
+      if (result && typeof result.then === 'function') {
+        return result.then(
+          (v: any) => { end('OK', captureIO ? { 'tool.result': safeIO(v) } : undefined); return v; },
+          (e: any) => {
+            const error = e instanceof Error ? e : new Error(String(e));
+            trace.getSpan(ctx)?.recordException(error);
+            end('ERROR', { 'error.message': error.message });
+            throw e;
+          },
+        ) as any;
+      }
+
+      end('OK', captureIO ? { 'tool.result': safeIO(result) } : undefined);
       return result;
     } as T;
   }

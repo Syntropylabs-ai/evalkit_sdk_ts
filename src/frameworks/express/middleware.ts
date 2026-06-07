@@ -34,8 +34,8 @@ export function createExpressMiddleware(
     res.setHeader?.('x-trace-id', traceId);
     res.setHeader?.('traceparent', `00-${traceId}-${spanId}-01`);
 
-    // Capture response body — accumulate chunks from write() + end() up to 4 KB.
-    const BODY_MAX = 4096;
+    // Capture response body — accumulate chunks from write() + end() up to the configured limit.
+    const BODY_MAX = client.options.maxBodyBytes;
     const bodyChunks: Buffer[] = [];
     let bodyLen = 0;
     const captureChunk = (chunk: unknown): void => {

@@ -228,7 +228,7 @@ export function patchIncomingHttp(client: EvalKitClient): void {
     // Capture the request body by listening to 'data' events on the IncomingMessage stream.
     // Multiple 'data' listeners are safe — Node.js EventEmitter delivers the same chunks to all.
     // body-parser (Express/NestJS) will add its own listeners and receive the same data unaffected.
-    const BODY_MAX = 8192;
+    const BODY_MAX = client.options.maxBodyBytes;
     const reqBodyChunks: Buffer[] = [];
     let reqBodyLen = 0;
     req.on('data', (chunk: unknown) => {
