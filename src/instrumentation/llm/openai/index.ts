@@ -1,7 +1,7 @@
 import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opentelemetry/api";
 import type { Span, Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
-import { recordSimToolCall } from "../../../core/simulation.js";
+import { emitToolCalls, fromOpenAIChat } from "../_toolcalls.js";
 
 type Messages = Array<{ role: string; content: string | null }>;
 type ToolCall = {
@@ -175,34 +175,8 @@ export function patchOpenAI(
       "evalkit.completion": completion,
     });
 
-    for (const tc of choice?.message.tool_calls ?? []) {
-      span.addEvent("gen_ai.tool.call", {
-        "gen_ai.tool.call.id": tc.id,
-        "gen_ai.tool.name": tc.function.name,
-        "gen_ai.tool.call.arguments": tc.function.arguments,
-      });
-      try {
-        let parsedArgs: Record<string, unknown> | undefined;
-        try { parsedArgs = JSON.parse(tc.function.arguments); } catch { /* keep undefined */ }
-        recordSimToolCall(span.spanContext().traceId, tc.function.name, parsedArgs);
-      } catch { /* never break tracing */ }
-      // Auto tool span — the model's tool request, nested under this LLM call.
-      // No user code needed; for execution timing, wrap the tool with traceFunction.
-      const toolSpan = client.tracer.startSpan(
-        tc.function.name,
-        {
-          kind: SpanKind.INTERNAL,
-          attributes: {
-            "evalkit.span_type": "tool_call",
-            "gen_ai.tool.name": tc.function.name,
-            "gen_ai.tool.call.id": tc.id,
-            "gen_ai.tool.call.arguments": tc.function.arguments,
-          },
-        },
-        spanCtx,
-      );
-      toolSpan.end();
-    }
+    // Tool calls -> event on this span + child tool_call span + sim record (one path).
+    emitToolCalls(client, span, fromOpenAIChat(result));
 
     span.setStatus({ code: SpanStatusCode.OK });
     span.end();

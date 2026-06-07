@@ -57,7 +57,14 @@ export function createHapiPlugin(
           const sc = request.response?.output?.statusCode ??
             request.response?.statusCode ??
             200;
-          entry.end(sc >= 400 ? 'ERROR' : 'OK', { statusCode: sc });
+          let responseBody: string | undefined;
+          try {
+            const src = request.response?.source ?? request.response?.result;
+            if (src !== undefined && src !== null) {
+              responseBody = (typeof src === 'string' ? src : JSON.stringify(src)).slice(0, 4096);
+            }
+          } catch { /* ignore */ }
+          entry.end(sc >= 400 ? 'ERROR' : 'OK', { statusCode: sc, body: responseBody });
           requestEndMap.delete(request);
         }
         return h.continue;

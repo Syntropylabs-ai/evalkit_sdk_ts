@@ -1,11 +1,10 @@
 import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opentelemetry/api";
 import type { Span, Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
-import { recordSimToolCall } from "../../../core/simulation.js";
+import { emitToolCalls, fromAnthropicBlocks } from "../_toolcalls.js";
 
 type AnthropicMessages = Array<{ role: string; content: string }>;
 type ContentBlock = { type: string; text?: string; id?: string; name?: string; input?: unknown };
-type ToolUseBlock = ContentBlock & { type: "tool_use"; id: string; name: string; input: unknown };
 type Message = {
   id: string;
   model: string;
@@ -179,33 +178,8 @@ export function patchAnthropic(
       "evalkit.completion": textContent,
     });
 
-    for (const block of result.content) {
-      if (block.type === "tool_use") {
-        const tb = block as ToolUseBlock;
-        span.addEvent("gen_ai.tool.call", {
-          "gen_ai.tool.call.id": tb.id,
-          "gen_ai.tool.name": tb.name,
-          "gen_ai.tool.call.arguments": JSON.stringify(tb.input),
-        });
-        try {
-          recordSimToolCall(span.spanContext().traceId, tb.name, tb.input as Record<string, unknown>);
-        } catch { /* never break tracing */ }
-        const toolSpan = client.tracer.startSpan(
-          tb.name,
-          {
-            kind: SpanKind.INTERNAL,
-            attributes: {
-              "evalkit.span_type": "tool_call",
-              "gen_ai.tool.name": tb.name,
-              "gen_ai.tool.call.id": tb.id,
-              "gen_ai.tool.call.arguments": JSON.stringify(tb.input),
-            },
-          },
-          spanCtx,
-        );
-        toolSpan.end();
-      }
-    }
+    // Tool calls -> event on this span + child tool_call span + sim record (one path).
+    emitToolCalls(client, span, fromAnthropicBlocks(result.content));
 
     span.setStatus({ code: SpanStatusCode.OK });
     span.end();

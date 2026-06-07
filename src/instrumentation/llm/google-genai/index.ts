@@ -1,7 +1,7 @@
 import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opentelemetry/api";
 import type { Span, Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
-import { recordSimToolCall } from "../../../core/simulation.js";
+import { emitToolCalls, fromGoogleParts } from "../_toolcalls.js";
 
 // New unified Google SDK: `@google/genai`.
 //   const ai = new GoogleGenAI({ apiKey });
@@ -81,42 +81,13 @@ function completionFrom(resp: GenAIResponse): string {
   return resp?.text ?? "";
 }
 
-function recordToolCalls(resp: GenAIResponse, span: Span, traceId: string | undefined): void {
-  const calls: Array<{ name?: string; args?: Record<string, unknown>; id?: string }> = [];
-  if (Array.isArray(resp?.functionCalls)) calls.push(...resp.functionCalls);
-  else {
-    for (const cand of resp?.candidates ?? []) {
-      for (const p of cand.content?.parts ?? []) {
-        if (p.functionCall?.name) calls.push(p.functionCall);
-      }
-    }
-  }
-  for (const fc of calls) {
-    const name = fc.name ?? "";
-    if (!name) continue;
-    let argsJson = "";
-    try { argsJson = JSON.stringify(fc.args ?? {}); } catch { argsJson = String(fc.args); }
-    span.addEvent("gen_ai.tool.call", {
-      "gen_ai.tool.name": name,
-      "gen_ai.tool.call.arguments": argsJson,
-      "gen_ai.tool.call.id": fc.id ?? "",
-    });
-    const toolSpan = client_tracer_startToolSpan(span);
-    recordSimToolCall(traceId, name, fc.args);
-    if (toolSpan) toolSpan.end();
-  }
-}
-
-// Tool span helper bound lazily to avoid passing the client through every call.
+// Lazily bound so recordToolCalls (called from two sites) can reach the client
+// without threading it through every call.
 let _client: EvalKitClient | null = null;
-function client_tracer_startToolSpan(parent: Span): Span | null {
-  if (!_client) return null;
-  const ctx = trace.setSpan(otelContext.active(), parent);
-  return _client.tracer.startSpan(
-    "tool_call",
-    { kind: SpanKind.INTERNAL, attributes: { "evalkit.span_type": "tool_call" } },
-    ctx,
-  );
+
+function recordToolCalls(resp: GenAIResponse, span: Span, _traceId?: string | undefined): void {
+  if (!_client) return;
+  emitToolCalls(_client, span, fromGoogleParts(resp));
 }
 
 export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto, parentCtx?: OtelContext): void {

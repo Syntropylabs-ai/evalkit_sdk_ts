@@ -1,6 +1,6 @@
 {
   "name": "syntropylabs-evalkit",
-  "version": "0.1.21",
+  "version": "0.1.24",
   "description": "EvalKit TypeScript SDK — OpenTelemetry-based LLM observability and tracing",
   "license": "LicenseRef-Proprietary",
   "author": "Syntropy Labs",

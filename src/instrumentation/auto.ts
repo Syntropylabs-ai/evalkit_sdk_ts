@@ -229,7 +229,7 @@ export function setupAutoInstrumentation(client: EvalKitClient): void {
   try { patchHttp(client); } catch { /* sealed ESM namespace — skip */ }
   patchFetch();
   patchConsole(client);
-  patchErrors();
+  patchErrors(client);
   tryPatchMongoose(client);
   tryPatchAxios(client);
   // Fire-and-forget — resolve in next microtask (module already cached),

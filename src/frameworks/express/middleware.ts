@@ -34,12 +34,43 @@ export function createExpressMiddleware(
     res.setHeader?.('x-trace-id', traceId);
     res.setHeader?.('traceparent', `00-${traceId}-${spanId}-01`);
 
+    // Capture response body — accumulate chunks from write() + end() up to 4 KB.
+    const BODY_MAX = 4096;
+    const bodyChunks: Buffer[] = [];
+    let bodyLen = 0;
+    const captureChunk = (chunk: unknown): void => {
+      if (!chunk || bodyLen >= BODY_MAX) return;
+      try {
+        const b = Buffer.isBuffer(chunk)
+          ? chunk
+          : typeof chunk === 'string'
+            ? Buffer.from(chunk)
+            : null;
+        if (b?.length) { bodyChunks.push(b); bodyLen += b.length; }
+      } catch { /* never affect the response */ }
+    };
+
+    const origWrite = (res.write as (...args: any[]) => any).bind(res);
     const origEnd = res.end as (...args: any[]) => any;
+
+    (res as any).write = function (chunk: any, ...rest: any[]) {
+      captureChunk(chunk);
+      return origWrite(chunk, ...rest);
+    };
+
     res.end = function (...args: any[]) {
+      captureChunk(args[0]);
       const sc = (res.statusCode as number) ?? 200;
+      let responseBody: string | undefined;
+      if (bodyChunks.length) {
+        try {
+          responseBody = Buffer.concat(bodyChunks).subarray(0, BODY_MAX).toString('utf-8');
+        } catch { /* ignore */ }
+      }
       end(sc >= 400 ? 'ERROR' : 'OK', {
         statusCode: sc,
         headers: res.getHeaders ? res.getHeaders() as Record<string, string> : undefined,
+        body: responseBody,
       });
       return origEnd.apply(res, args);
     };

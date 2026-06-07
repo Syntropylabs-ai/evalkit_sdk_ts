@@ -77,13 +77,30 @@ export function createFastifyPlugin(
       },
     );
 
+    // onSend fires with the serialized payload before it is sent to the client.
+    fastify.addHook(
+      'onSend',
+      (request: any, reply: any, payload: any, hookDone: (err: null, payload: any) => void) => {
+        try {
+          if (payload !== undefined && payload !== null) {
+            const s = (typeof payload === 'string' ? payload : JSON.stringify(payload)).slice(0, 4096);
+            request._evalkitRespBody = s;
+          }
+        } catch { /* ignore */ }
+        hookDone(null, payload);
+      },
+    );
+
     fastify.addHook(
       'onResponse',
       (request: any, reply: any, hookDone: () => void) => {
         if (typeof request._evalkitEnd === 'function' && !request._evalkitEnded) {
           request._evalkitEnded = true;
           const sc: number = reply.statusCode ?? 200;
-          request._evalkitEnd(sc >= 400 ? 'ERROR' : 'OK', { statusCode: sc });
+          request._evalkitEnd(sc >= 400 ? 'ERROR' : 'OK', {
+            statusCode: sc,
+            body: request._evalkitRespBody,
+          });
         }
         hookDone();
       },

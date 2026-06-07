@@ -42,7 +42,14 @@ export function createKoaMiddleware(
     try {
       await otelContext.with(otelCtx, next);
       const sc = ctx.status ?? 200;
-      end(sc >= 400 ? 'ERROR' : 'OK', { statusCode: sc });
+      let responseBody: string | undefined;
+      try {
+        const b = ctx.body;
+        if (b !== undefined && b !== null) {
+          responseBody = (typeof b === 'string' ? b : JSON.stringify(b)).slice(0, 4096);
+        }
+      } catch { /* ignore */ }
+      end(sc >= 400 ? 'ERROR' : 'OK', { statusCode: sc, body: responseBody });
     } catch (err: any) {
       end('ERROR', { statusCode: ctx.status ?? 500 });
       throw err;

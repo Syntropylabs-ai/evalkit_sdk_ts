@@ -2,6 +2,7 @@ import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opente
 import type { Span, Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
 import { recordSimToolCall } from "../../../core/simulation.js";
+import { emitToolCalls, fromLangChainResult } from "../_toolcalls.js";
 import { dynImport } from "../../../utils/dynimport.js";
 
 // LangChain / LangGraph instrumentation for the TS SDK.
@@ -157,18 +158,9 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
     handleLLMEnd(output: any, runId: string) {
       const { tin, tout } = llmResultTokens(output);
       const rec = runs.get(runId);
-      // Record tool calls as events + sim collector before ending.
+      // Tool calls -> event on the LLM span + child tool_call span + sim record (one path).
       try {
-        for (const batch of output?.generations ?? []) {
-          for (const g of batch ?? []) {
-            for (const tc of g?.message?.tool_calls ?? []) {
-              if (tc?.name && rec) {
-                rec.span.addEvent("gen_ai.tool.call", { "gen_ai.tool.name": tc.name, "gen_ai.tool.call.arguments": truncate(tc.args ?? {}) });
-                recordSimToolCall(rec.span.spanContext().traceId, tc.name, tc.args);
-              }
-            }
-          }
-        }
+        if (rec) emitToolCalls(client, rec.span, fromLangChainResult(output));
       } catch { /* ignore */ }
       endRun(runId, "OK", {
         "evalkit.completion": llmResultCompletion(output),
