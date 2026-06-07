@@ -44,6 +44,28 @@ type DiscoveryLike = {
   getControllers: () => Array<{ instance?: unknown }>;
 };
 
+/**
+ * NestJS (and other decorator-based frameworks) attach routing/param/guard
+ * metadata to the METHOD FUNCTION OBJECT via reflect-metadata. Replacing the
+ * method with a wrapper drops that metadata, so the router can no longer find
+ * the route → every endpoint 404s. Copy all reflect-metadata from the original
+ * onto the wrapper so the framework keeps working. Dependency-free: uses the
+ * global Reflect that reflect-metadata augments (always loaded in NestJS apps);
+ * a no-op when reflect-metadata isn't present.
+ */
+function copyReflectMetadata(from: object, to: object): void {
+  const R = (globalThis as { Reflect?: any }).Reflect as any;
+  if (!R || typeof R.defineMetadata !== 'function') return;
+  const getKeys = typeof R.getOwnMetadataKeys === 'function' ? R.getOwnMetadataKeys : R.getMetadataKeys;
+  const getMeta = typeof R.getOwnMetadata === 'function' ? R.getOwnMetadata : R.getMetadata;
+  if (typeof getKeys !== 'function' || typeof getMeta !== 'function') return;
+  let keys: unknown[] = [];
+  try { keys = getKeys.call(R, from) || []; } catch { return; }
+  for (const key of keys) {
+    try { R.defineMetadata(key, getMeta.call(R, key, from), to); } catch { /* ignore */ }
+  }
+}
+
 export function autoTraceNest(
   client: EvalKitClient,
   discovery: DiscoveryLike,
@@ -74,6 +96,13 @@ export function autoTraceNest(
 
       const original = desc.value as (...args: unknown[]) => unknown;
       const traced = client.traceFunction(`${className}.${name}`, original, undefined, captureIO);
+
+      // CRITICAL: preserve framework metadata (routes, params, guards) and the
+      // function's identity, otherwise NestJS can't resolve the handler → 404.
+      copyReflectMetadata(original, traced);
+      try { Object.defineProperty(traced, 'name', { value: name, configurable: true }); } catch { /* ignore */ }
+      try { Object.defineProperty(traced, 'length', { value: original.length, configurable: true }); } catch { /* ignore */ }
+
       (traced as { __evalkitTraced?: boolean }).__evalkitTraced = true;
       Object.defineProperty(proto, name, { ...desc, value: traced });
       methods++;
