@@ -287,16 +287,44 @@ export function traceObject<T extends Record<string, any>>(
  * NestJS is the one framework with a DI registry the SDK can enumerate; for
  * other frameworks use `traceObject` / `traceFunction` on your modules.
  *
- * Usage (main.ts), after `const app = await NestFactory.create(...)`:
- *   import { DiscoveryService } from '@nestjs/core';   // requires DiscoveryModule in AppModule
- *   evalkit.enableNestjsAutoTrace(app.get(DiscoveryService));
+ * Usage (main.ts), after `const app = await NestFactory.create(...)` — one line,
+ * pass the app and the SDK resolves DiscoveryService itself (requires
+ * DiscoveryModule in AppModule, which Nest provides by default):
+ *   await evalkit.enableNestjsAutoTrace(app);
  *
- * Returns the number of methods wrapped.
+ * You may also pass a DiscoveryService directly. Returns the number of methods
+ * wrapped (0 if discovery couldn't be resolved — never throws).
  */
-export function enableNestjsAutoTrace(
-  discovery: { getProviders: () => Array<{ instance?: unknown }>; getControllers: () => Array<{ instance?: unknown }> },
+type DiscoveryService = {
+  getProviders: () => Array<{ instance?: unknown }>;
+  getControllers: () => Array<{ instance?: unknown }>;
+};
+
+export async function enableNestjsAutoTrace(
+  appOrDiscovery: DiscoveryService | { get: (token: unknown) => unknown },
   options?: { include?: RegExp; captureIO?: boolean },
-): number {
+): Promise<number> {
+  let discovery: DiscoveryService | undefined;
+  const candidate = appOrDiscovery as Partial<DiscoveryService> & { get?: (token: unknown) => unknown };
+  if (typeof candidate.getProviders === 'function' && typeof candidate.getControllers === 'function') {
+    discovery = appOrDiscovery as DiscoveryService;
+  } else if (typeof candidate.get === 'function') {
+    // It's a Nest app — resolve DiscoveryService from its DI container so callers
+    // don't have to import @nestjs/core themselves. Dynamic import keeps the SDK
+    // framework-free.
+    try {
+      // Non-literal specifier so TS doesn't require @nestjs/core at build time —
+      // it's an optional runtime dependency, present in any NestJS app.
+      const nestCoreSpecifier = '@nestjs/core';
+      const nestCore = (await import(nestCoreSpecifier)) as { DiscoveryService?: unknown };
+      if (nestCore.DiscoveryService) {
+        discovery = candidate.get(nestCore.DiscoveryService) as DiscoveryService;
+      }
+    } catch (e) {
+      console.warn('[evalkit] enableNestjsAutoTrace: could not resolve DiscoveryService:', (e as Error)?.message);
+    }
+  }
+  if (!discovery) return 0;
   return _autoTraceNest(getInstance(), discovery, options);
 }
 

@@ -101,15 +101,19 @@ export const orders = evalkit.traceObject({ place, cancel }, { prefix: "orders" 
 ### NestJS — trace the whole app automatically
 
 NestJS exposes a DI registry, so the SDK can wrap **every** provider/controller
-method for you — no per-class decorators. In `main.ts`:
+method for you — no per-class decorators. One line in `main.ts`: pass the app and
+the SDK resolves `DiscoveryService` itself (no `@nestjs/core` import needed):
 
 ```ts
-import { DiscoveryModule, DiscoveryService } from "@nestjs/core";
-// 1) add DiscoveryModule to your AppModule's imports
-// 2) after the app is created:
 const app = await NestFactory.create(AppModule);
-evalkit.enableNestjsAutoTrace(app.get(DiscoveryService));
+evalkit.init({ subscriptionKey: "tk_live_…", serviceName: "orchestrator" });
+await evalkit.enableNestjsAutoTrace(app);   // ← the only line you add
+await app.listen(5000);
 ```
+
+Route metadata (`@Get`, `@Body`, guards) is preserved, so routing and auth are
+unaffected. The call never throws — if discovery can't be resolved it's a no-op.
+You can still pass a `DiscoveryService` directly if you prefer.
 
 > Auto-discovery is only possible where the framework has a registry (NestJS). For
 > Express / Fastify / Koa / Hono / Hapi, use `traceObject` / `traceFunction` on your
