@@ -4,10 +4,17 @@ import type { ExportResult } from "@opentelemetry/core";
 import type { TraceEnvelope, SpanEvent, BatchIngestRequest } from "./types.js";
 import { simByTraceId } from "./simulation.js";
 
+// After this many consecutive auth failures (401/403) the exporter disables
+// itself. An invalid subscription key never becomes valid by retrying, so
+// hammering the ingest endpoint on every flush just spams logs and CPU.
+const AUTH_FAIL_LIMIT = 3;
+
 export class EvalKitExporter implements SpanExporter {
   private readonly url: string;
   private readonly subscriptionKey: string;
   private readonly debug: boolean;
+  private authFailures = 0;
+  private disabled = false;
 
   constructor(opts: { baseUrl: string; subscriptionKey: string; debug?: boolean }) {
     this.url = `${opts.baseUrl.replace(/\/$/, "")}/v1/ingest`;
@@ -16,6 +23,11 @@ export class EvalKitExporter implements SpanExporter {
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
+    if (this.disabled) {
+      resultCallback({ code: ExportResultCode.FAILED });
+      return;
+    }
+
     const events = spans.map((s) => this.toEnvelope(s));
     const body: BatchIngestRequest = { events };
 
@@ -34,10 +46,24 @@ export class EvalKitExporter implements SpanExporter {
       .then(async (res) => {
         if (!res.ok) {
           const text = await res.text().catch(() => "(no body)");
-          console.error(`[evalkit] export failed ${res.status}: ${text}`);
+          if (res.status === 401 || res.status === 403) {
+            this.authFailures++;
+            if (this.authFailures >= AUTH_FAIL_LIMIT) {
+              this.disabled = true;
+              console.error(
+                `[evalkit] export rejected ${res.status}: ${text} — disabling tracing after ` +
+                `${this.authFailures} consecutive auth failures; check your EvalKit subscription key.`,
+              );
+            } else if (this.debug) {
+              console.warn(`[evalkit] export rejected ${res.status} (auth failure ${this.authFailures}/${AUTH_FAIL_LIMIT})`);
+            }
+          } else {
+            console.error(`[evalkit] export failed ${res.status}: ${text}`);
+          }
           resultCallback({ code: ExportResultCode.FAILED });
           return;
         }
+        this.authFailures = 0; // success resets the auth-failure streak
         if (this.debug) {
           const data = await res.json().catch(() => ({}));
           console.log(`[evalkit] exported ${events.length} span(s) — status: ${(data as { status?: string }).status}`);

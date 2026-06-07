@@ -19,10 +19,25 @@ const SKIP = new Set([
   'onApplicationShutdown',
   'beforeApplicationShutdown',
   'configure',
+  // Framework contract methods — these are invoked by NestJS/Passport with a
+  // specific calling convention (arity, `this`, return shape). Wrapping them
+  // breaks auth, guards, pipes, interceptors, and filters. NEVER trace them.
+  'validate',        // Passport strategy verify callback (auth!)
+  'authenticate',    // Passport strategy
+  'serializeUser',
+  'deserializeUser',
+  'canActivate',     // guards
+  'intercept',       // interceptors
+  'transform',       // pipes
+  'catch',           // exception filters
+  'use',             // middleware
 ]);
 
 // Only trace your own app layers; keeps framework internals out of the trace.
-const DEFAULT_CLASS_RE = /(Service|Controller|Gateway|Resolver|Repository|Manager|UseCase|Handler|Strategy)$/;
+// NOTE: `Strategy` is intentionally excluded — Passport auth strategies end in
+// `Strategy` and wrapping their `validate()` breaks authentication. Guards
+// (`*Guard`) are also excluded for the same reason.
+const DEFAULT_CLASS_RE = /(Service|Controller|Gateway|Resolver|Repository|UseCase|Handler)$/;
 
 type DiscoveryLike = {
   getProviders: () => Array<{ instance?: unknown }>;
