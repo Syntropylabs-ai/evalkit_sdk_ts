@@ -9,6 +9,13 @@ import { simByTraceId } from "./simulation.js";
 // hammering the ingest endpoint on every flush just spams logs and CPU.
 const AUTH_FAIL_LIMIT = 3;
 
+// Hard ceiling on a single span's serialized size. Kept under Kafka's default
+// 1 MiB message limit so an oversized span (e.g. a captured base64 image body)
+// is trimmed — and dropped if still too big — instead of being sent and
+// rejected with "Message Size Too Large". Tracing must never ship a payload
+// the backend can't accept.
+const MAX_SPAN_BYTES = 900 * 1024;
+
 export class EvalKitExporter implements SpanExporter {
   private readonly url: string;
   private readonly subscriptionKey: string;
@@ -28,7 +35,18 @@ export class EvalKitExporter implements SpanExporter {
       return;
     }
 
-    const events = spans.map((s) => this.toEnvelope(s));
+    // Bound every span to the backend's message-size limit. Oversized spans are
+    // trimmed (heavy bodies → prompt/completion → attrs) and, only if still too
+    // big, dropped entirely — so a huge span can never break or stall ingest.
+    const events = spans
+      .map((s) => fitEnvelope(this.toEnvelope(s), this.debug))
+      .filter((e): e is TraceEnvelope => e !== null);
+
+    if (events.length === 0) {
+      resultCallback({ code: ExportResultCode.SUCCESS });
+      return;
+    }
+
     const body: BatchIngestRequest = { events };
 
     if (this.debug) {
@@ -157,6 +175,53 @@ export class EvalKitExporter implements SpanExporter {
 
     return envelope;
   }
+}
+
+// Guarantee a span serializes to <= MAX_SPAN_BYTES so it can always be ingested.
+// Drops the heaviest fields first (raw bodies, then prompt/completion, then every
+// large string attribute); if the skeleton still won't fit, returns null so the
+// caller skips it. Tracing must never send something the backend will reject.
+function fitEnvelope(env: TraceEnvelope, debug: boolean): TraceEnvelope | null {
+  const size = (e: TraceEnvelope): number => {
+    try { return JSON.stringify(e).length; } catch { return Infinity; }
+  };
+  if (size(env) <= MAX_SPAN_BYTES) return env;
+
+  const note = (n: number): string => `…[dropped ${n} bytes — exceeded trace span size limit]`;
+  const attrs = env.attributes as Record<string, unknown> | undefined;
+
+  // 1) Raw HTTP / GenAI bodies — where base64 images & file blobs live.
+  if (attrs) {
+    for (const k of ["http.response.body", "http.request.body", "gen_ai.response.body", "gen_ai.request.body", "response.body", "request.body"]) {
+      const v = attrs[k];
+      if (typeof v === "string" && v.length > 1024) attrs[k] = note(v.length);
+    }
+  }
+  if (size(env) <= MAX_SPAN_BYTES) return env;
+
+  // 2) Prompt / completion / status message.
+  if (env.prompt && env.prompt.length > 1024) env.prompt = note(env.prompt.length);
+  if (env.completion && env.completion.length > 1024) env.completion = note(env.completion.length);
+  if (env.statusMessage && env.statusMessage.length > 4096) env.statusMessage = env.statusMessage.slice(0, 4096);
+  if (size(env) <= MAX_SPAN_BYTES) return env;
+
+  // 3) Every remaining large string attribute.
+  if (attrs) {
+    for (const [k, v] of Object.entries(attrs)) {
+      if (typeof v === "string" && v.length > 512) attrs[k] = v.slice(0, 512) + "…";
+    }
+  }
+  if (size(env) <= MAX_SPAN_BYTES) return env;
+
+  // 4) Last resort: metadata-only skeleton.
+  env.attributes = { "trace.truncated": true };
+  env.events = undefined;
+  env.prompt = undefined;
+  env.completion = undefined;
+  if (size(env) <= MAX_SPAN_BYTES) return env;
+
+  if (debug) console.warn(`[evalkit] dropping oversized span "${env.operation}" (${size(env)}B > ${MAX_SPAN_BYTES}B)`);
+  return null;
 }
 
 function hrTimeToMs(hrTime: [number, number]): number {

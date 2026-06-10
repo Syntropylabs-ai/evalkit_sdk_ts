@@ -226,26 +226,39 @@ export function patchIncomingHttp(client: EvalKitClient): void {
     res.setHeader('traceparent', `00-${spanCtx.traceId}-${spanCtx.spanId}-01`);
 
     // Capture the request body by listening to 'data' events on the IncomingMessage stream.
-    // Multiple 'data' listeners are safe — Node.js EventEmitter delivers the same chunks to all.
-    // body-parser (Express/NestJS) will add its own listeners and receive the same data unaffected.
+    //
+    // IMPORTANT: attaching a 'data' listener switches the stream into FLOWING mode. For
+    // multipart/form-data uploads the framework parser (multer/busboy) attaches its listener
+    // ASYNCHRONOUSLY — after guards/interceptors resolve — by which point the streamed file
+    // bytes have already drained. The parser then sees a truncated stream and throws
+    // "Multipart: Unexpected end of form", 400-ing every file upload (dataset CSV, media,
+    // blog image, voice dataset). So we skip request-body capture for multipart and leave the
+    // upload stream paused for the real parser. (JSON/urlencoded parsers attach synchronously
+    // on the same tick, so they still receive every chunk and are unaffected.)
     const BODY_MAX = client.options.maxBodyBytes;
-    const reqBodyChunks: Buffer[] = [];
-    let reqBodyLen = 0;
-    req.on('data', (chunk: unknown) => {
-      try {
-        if (chunk && reqBodyLen < BODY_MAX) {
-          const b = Buffer.isBuffer(chunk) ? chunk : typeof chunk === 'string' ? Buffer.from(chunk) : null;
-          if (b && b.length) { reqBodyChunks.push(b); reqBodyLen += b.length; }
-        }
-      } catch { /* never affect the request */ }
-    });
-    req.on('end', () => {
-      if (!reqBodyChunks.length) return;
-      try {
-        const raw = Buffer.concat(reqBodyChunks).subarray(0, BODY_MAX).toString('utf-8');
-        if (raw) span.setAttribute('http.request.body', raw);
-      } catch { /* ignore */ }
-    });
+    const reqContentType = String(
+      (req.headers as Record<string, string | string[] | undefined>)['content-type'] ?? '',
+    ).toLowerCase();
+    const isMultipart = reqContentType.includes('multipart/form-data');
+    if (!isMultipart) {
+      const reqBodyChunks: Buffer[] = [];
+      let reqBodyLen = 0;
+      req.on('data', (chunk: unknown) => {
+        try {
+          if (chunk && reqBodyLen < BODY_MAX) {
+            const b = Buffer.isBuffer(chunk) ? chunk : typeof chunk === 'string' ? Buffer.from(chunk) : null;
+            if (b && b.length) { reqBodyChunks.push(b); reqBodyLen += b.length; }
+          }
+        } catch { /* never affect the request */ }
+      });
+      req.on('end', () => {
+        if (!reqBodyChunks.length) return;
+        try {
+          const raw = Buffer.concat(reqBodyChunks).subarray(0, BODY_MAX).toString('utf-8');
+          if (raw) span.setAttribute('http.request.body', raw);
+        } catch { /* ignore */ }
+      });
+    }
 
     // Capture the response body, bounded and pass-through: we only observe a copy of
     // what is written and always forward the original args, so streaming is never altered.
