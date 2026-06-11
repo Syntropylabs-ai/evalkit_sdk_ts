@@ -31,6 +31,9 @@ export interface GenerateScenariosOptions {
   provider?: string;
   apiKey?: string;
   temperature?: number;
+  reasoningEffort?: string;
+  maxCompletionTokens?: number;
+  maxTokens?: number;
   apiUrl?: string;
 }
 
@@ -74,6 +77,9 @@ export async function generateScenarios(
   if (opts.provider) body.provider = opts.provider;
   if (opts.apiKey) body.apiKey = opts.apiKey;
   if (opts.temperature !== undefined) body.temperature = opts.temperature;
+  if (opts.reasoningEffort !== undefined) body.reasoningEffort = opts.reasoningEffort;
+  if (opts.maxCompletionTokens !== undefined) body.maxCompletionTokens = opts.maxCompletionTokens;
+  if (opts.maxTokens !== undefined) body.maxTokens = opts.maxTokens;
 
   const res = await fetch(base + "/scenarios/generate", {
     method: "POST",
