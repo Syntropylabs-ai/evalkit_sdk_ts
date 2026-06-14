@@ -1,6 +1,6 @@
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api";
 import { evaluate as _evaluate } from "./evaluate.js";
-import { generateScenarios as _generateScenarios, simulateUser as _simulateUser } from "./simulate.js";
+import { generateScenarios as _generateScenarios, simulateUser as _simulateUser, evaluateSimulation as _evaluateSimulation } from "./simulate.js";
 import { EvalKitClient } from "./core/client.js";
 import { extractTraceparent as _extractTraceparentHelper } from "./core/context.js";
 import { patchOpenAI } from "./instrumentation/llm/openai/index.js";
@@ -42,7 +42,7 @@ export { evaluate } from "./evaluate.js";
 export type { OfflineEvalInput, OfflineEvalResult, OfflineMetric } from "./evaluate.js";
 
 // Scenario generation + simulation
-export type { SimContext, AgentTurnResult, GenerateScenariosOptions, SimulateUserOptions } from "./simulate.js";
+export type { SimContext, AgentTurnResult, GenerateScenariosOptions, SimulateUserOptions, EvaluateSimulationOptions, EvaluateSimulationResult, SimEvalMetric, SimEvalScenario } from "./simulate.js";
 
 // ---------------------------------------------------------------------------
 // Global singleton — mirrors Sentry / LangFuse init pattern
@@ -350,6 +350,12 @@ export function simulateUser(
   return _simulateUser(getInstance(), opts);
 }
 
+export function evaluateSimulation(
+  opts: import("./simulate.js").EvaluateSimulationOptions
+): Promise<import("./simulate.js").EvaluateSimulationResult> {
+  return _evaluateSimulation(getInstance(), opts);
+}
+
 function _extractTraceparent(header: string | undefined): OtelContext {
   return _extractTraceparentHelper(header);
 }
@@ -359,6 +365,7 @@ export default {
   evaluate: _evaluate,
   generateScenarios,
   simulateUser,
+  evaluateSimulation,
   // Manual patch helpers
   patchOpenAIClient,
   patchAnthropicClient,

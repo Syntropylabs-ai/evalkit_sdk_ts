@@ -49,6 +49,57 @@ export interface SimulateUserOptions {
   apiKey?: string;
 }
 
+export interface EvaluateSimulationOptions {
+  /** The simulationId returned by simulateUser. */
+  simulationId: string;
+  /** Mongo id of the evaluator collection whose rules to run. */
+  collectionId: string;
+  /** Judge provider, e.g. "openai", "anthropic", "google". */
+  provider: string;
+  /** Judge model id, e.g. "gpt-4o". */
+  model: string;
+  /** BYOK judge key — used for the judge call only, never stored. */
+  apiKey: string;
+  /** A specific run of the simulation. Defaults to the most recent run. */
+  runId?: string;
+  /** Judge output token cap (defaults to the backend's value). */
+  maxTokens?: number;
+  /** Override the control-plane URL (default: the value from init). */
+  apiUrl?: string;
+}
+
+export interface SimEvalMetric {
+  ruleId: string;
+  ruleName: string;
+  category: string;
+  score: number;
+  passed: boolean;
+  reason: string;
+}
+
+export interface SimEvalScenario {
+  scenarioId: string;
+  name: string;
+  traceId: string;
+  status: string; // "OK" | "ERROR" | "skipped"
+  overallScore: number;
+  passed: boolean;
+  metrics: SimEvalMetric[];
+  error?: string; // only set when status === "skipped"
+}
+
+export interface EvaluateSimulationResult {
+  simulationId: string;
+  runId: string;
+  scenarios: SimEvalScenario[];
+  aggregate: {
+    averageScore: number;
+    passRate: number;
+    totalScenarios: number;
+    evaluatedScenarios: number;
+  };
+}
+
 function randHex(n: number): string {
   return randomBytes(n).toString("hex");
 }
@@ -209,4 +260,41 @@ export async function simulateUser(
   }
 
   return { simulationId, runId, results };
+}
+
+/**
+ * Evaluate a completed scenario-simulation run against an evaluator collection.
+ * Runs the collection's rules over every scenario of the run (server-side) and
+ * returns per-scenario, per-criterion scores + reasons. The judge is BYOK.
+ */
+export async function evaluateSimulation(
+  client: EvalKitClient,
+  opts: EvaluateSimulationOptions,
+): Promise<EvaluateSimulationResult> {
+  const base = (opts.apiUrl ?? process.env.EVALKIT_API_URL ?? client.options.apiUrl).replace(/\/$/, "");
+  const body: Record<string, unknown> = {
+    simulationId: opts.simulationId,
+    collectionId: opts.collectionId,
+    provider: opts.provider,
+    model: opts.model,
+    apiKey: opts.apiKey,
+  };
+  if (opts.runId !== undefined) body.runId = opts.runId;
+  if (opts.maxTokens !== undefined) body.maxTokens = opts.maxTokens;
+
+  const res = await fetch(base + "/simulations/evaluate", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Subscription-Key": client.options.subscriptionKey,
+    },
+    body: JSON.stringify(body),
+    // Evaluating many scenarios can take minutes; give the judge room.
+    signal: AbortSignal.timeout(300_000),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`evaluateSimulation failed ${res.status}: ${text}`);
+  }
+  return (await res.json()) as EvaluateSimulationResult;
 }
