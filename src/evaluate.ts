@@ -300,23 +300,20 @@ export function evaluate(input: OfflineEvalInput): OfflineEvalResult {
 
   const result: OfflineEvalResult = { scores, details };
 
-  // Push scores as an eval_result span if the SDK is initialised.
-  // Import lazily to avoid circular dependency — index.ts imports this file.
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const sdk = require('./index.js') as typeof import('./index.js');
-    const spanAttrs: Record<string, string | number | boolean> = {
-      'evalkit.span_type': 'eval_result',
-      'evalkit.eval_type': 'offline',
-    };
-    for (const [metric, score] of Object.entries(scores)) {
-      spanAttrs[`evalkit.metric.${metric}`] = score as number;
-    }
-    const { end } = sdk.startSpan('evaluation', spanAttrs);
-    end('OK');
-  } catch {
-    // SDK not initialised — skip span push silently
+  // Push scores as an eval_result span if the SDK is initialised. Use a dynamic
+  // import (works in BOTH ESM and CJS) rather than require() — index.ts imports
+  // this file, so a static import would be circular, and require() is undefined in
+  // native ESM consumers. Fire-and-forget: evaluate() stays synchronous.
+  const spanAttrs: Record<string, string | number | boolean> = {
+    'evalkit.span_type': 'eval_result',
+    'evalkit.eval_type': 'offline',
+  };
+  for (const [metric, score] of Object.entries(scores)) {
+    spanAttrs[`evalkit.metric.${metric}`] = score as number;
   }
+  void import('./index.js')
+    .then((sdk) => { const { end } = sdk.startSpan('evaluation', spanAttrs); end('OK'); })
+    .catch(() => { /* SDK not initialised — skip span push silently */ });
 
   return result;
 }

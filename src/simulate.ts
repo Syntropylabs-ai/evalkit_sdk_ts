@@ -110,10 +110,19 @@ function jsonableTool(t: any): unknown {
   return String(t);
 }
 
+/** These control-plane calls use global fetch (Node 18+). Fail with a clear
+ *  message rather than a cryptic "fetch is not a function" on older runtimes. */
+function _requireFetch(): void {
+  if (typeof fetch === "undefined") {
+    throw new Error("[evalkit] global fetch is required (Node 18+). Upgrade Node or install a fetch polyfill.");
+  }
+}
+
 export async function generateScenarios(
   client: EvalKitClient,
   opts: GenerateScenariosOptions,
 ): Promise<any[]> {
+  _requireFetch();
   const base = (opts.apiUrl ?? process.env.EVALKIT_API_URL ?? client.options.apiUrl).replace(/\/$/, "");
   const body: Record<string, unknown> = {
     agentInstructions: opts.agentInstructions,
@@ -271,6 +280,7 @@ export async function evaluateSimulation(
   client: EvalKitClient,
   opts: EvaluateSimulationOptions,
 ): Promise<EvaluateSimulationResult> {
+  _requireFetch();
   const base = (opts.apiUrl ?? process.env.EVALKIT_API_URL ?? client.options.apiUrl).replace(/\/$/, "");
   const body: Record<string, unknown> = {
     simulationId: opts.simulationId,
