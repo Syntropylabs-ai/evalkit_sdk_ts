@@ -7,7 +7,7 @@ import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import type { EvalKitOptions } from "./types.js";
 import { EvalKitExporter } from "./exporter.js";
 
-const SDK_VERSION = "0.1.30";
+const SDK_VERSION = "0.1.31";
 
 const IO_MAX = 4096;
 

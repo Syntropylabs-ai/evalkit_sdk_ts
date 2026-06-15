@@ -13,6 +13,7 @@ import { patchMysql2 } from './db/mysql2.js';
 import { patchRedis } from './db/redis.js';
 import { patchAxios } from './http/axios.js';
 import { patchHttp, patchFetch, patchIncomingHttp } from './http/node-http.js';
+import { patchMcp } from './mcp.js';
 import { patchConsole } from './runtime/console.js';
 import { patchErrors } from './runtime/errors.js';
 
@@ -224,6 +225,21 @@ async function tryPatchLangChainAsync(client: EvalKitClient): Promise<void> {
   } catch {}
 }
 
+async function tryPatchMcpAsync(client: EvalKitClient): Promise<void> {
+  // @modelcontextprotocol/sdk — patch Client.prototype.callTool → tool_call span.
+  try {
+    const _req = getRequire();
+    const mod = _req('@modelcontextprotocol/sdk/client/index.js');
+    const Client = mod.Client ?? mod.default?.Client;
+    if (Client?.prototype) { patchMcp(client, Client); return; }
+  } catch {}
+  try {
+    const mod = await dynImport('@modelcontextprotocol/sdk/client/index.js');
+    const Client = mod.Client ?? mod.default?.Client;
+    if (Client?.prototype) patchMcp(client, Client);
+  } catch {}
+}
+
 export function setupAutoInstrumentation(client: EvalKitClient): void {
   try { patchIncomingHttp(client); } catch { /* skip if http sealed */ }
   try { patchHttp(client); } catch { /* sealed ESM namespace — skip */ }
@@ -245,6 +261,7 @@ export function setupAutoInstrumentation(client: EvalKitClient): void {
     tryPatchGoogleGenAIAsync(client),
     tryPatchGroqAsync(client),
     tryPatchLangChainAsync(client),
+    tryPatchMcpAsync(client),
     tryPatchPgAsync(client),
     tryPatchMysql2Async(client),
     tryPatchIoredisAsync(client),

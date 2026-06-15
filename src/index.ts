@@ -23,6 +23,7 @@ import { createHonoMiddleware } from "./frameworks/hono/middleware.js";
 import { createHapiPlugin } from "./frameworks/hapi/plugin.js";
 import { EvalKitInterceptor } from "./frameworks/nestjs/interceptor.js";
 import { autoTraceNest as _autoTraceNest } from "./frameworks/nestjs/autotrace.js";
+import { patchMcp as _patchMcp } from "./instrumentation/mcp.js";
 import { setupAutoInstrumentation } from "./instrumentation/auto.js";
 import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitOptions } from "./core/types.js";
@@ -124,6 +125,10 @@ export function patchPgClient(pgInstance: any): void {
 
 export function patchMysql2Client(mysqlInstance: any): void {
   _patchMysql2(getInstance(), mysqlInstance);
+}
+
+export function patchMCPClient(mcpClientClassOrInstance: any): void {
+  _patchMcp(getInstance(), mcpClientClassOrInstance);
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +386,7 @@ export default {
   patchAxiosClient,
   patchPgClient,
   patchMysql2Client,
+  patchMCPClient,
   // Framework integrations
   expressMiddleware,
   fastifyPlugin,

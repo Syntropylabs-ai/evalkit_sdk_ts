@@ -69,6 +69,13 @@ server.listen(0, async () => {
   evalkit.patchOpenAIClient(fakeOpenAI);
   await fakeOpenAI.chat.completions.create({ model: "gpt-4o", messages: [{ role: "user", content: "hi" }] });
 
+  // 2d) MCP client (fake @modelcontextprotocol/sdk Client) → tool_call span with real result
+  class FakeMCPClient {
+    async callTool(_params) { return { content: [{ type: "text", text: "sum=42" }], isError: false }; }
+  }
+  evalkit.patchMCPClient(FakeMCPClient);
+  await new FakeMCPClient().callTool({ name: "add", arguments: { a: 1, b: 2 } });
+
   // 3) langchainHandler() — no langchain installed → null, no crash
   const lh = await evalkit.langchainHandler();
   assert.strictEqual(lh, null, "langchainHandler null when absent");
@@ -147,6 +154,11 @@ server.listen(0, async () => {
     assert.ok(oa.length >= 1, "openai llm_call captured");
     const toolSpans = captured.filter((e) => e.spanType === "tool_call");
     assert.ok(toolSpans.some((t) => t.operation === "search"), "openai tool_call span emitted");
+
+    const mcpSpan = toolSpans.find((t) => t.operation === "add");
+    assert.ok(mcpSpan, "mcp tool_call span emitted");
+    assert.strictEqual(mcpSpan.attributes["mcp.tool.name"], "add", "mcp.tool.name attr");
+    assert.strictEqual(mcpSpan.attributes["tool.result"], "sum=42", "mcp tool result captured");
 
     console.log(`OK — ${captured.length} spans captured; all TS smoke assertions passed`);
     process.exit(0);
