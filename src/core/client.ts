@@ -6,13 +6,17 @@ import { Resource } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import type { EvalKitOptions } from "./types.js";
 import { EvalKitExporter } from "./exporter.js";
+import { errorAttrs } from "./errors-util.js";
 
-const SDK_VERSION = "0.1.31";
+const SDK_VERSION = "0.1.32";
 
 const IO_MAX = 4096;
 
-/** Serialize a function arg / return value for a span attribute. Never throws. */
-function safeIO(value: unknown, limit: number = IO_MAX): string {
+/** Serialize a function arg / return value for a span attribute. Never throws.
+ *  Returns undefined for `undefined` (so the caller omits the attribute instead of
+ *  storing the literal string "undefined"). */
+function safeIO(value: unknown, limit: number = IO_MAX): string | undefined {
+  if (value === undefined) return undefined;
   let s: string | undefined;
   try {
     s = JSON.stringify(value);
@@ -27,6 +31,13 @@ function safeIO(value: unknown, limit: number = IO_MAX): string {
     }
   }
   return s.length > limit ? s.slice(0, limit) + "…" : s;
+}
+
+/** Build a single capture attribute, omitted entirely when value is undefined/unserializable. */
+function ioAttr(key: string, value: unknown, captureIO: boolean): Record<string, string> | undefined {
+  if (!captureIO) return undefined;
+  const s = safeIO(value);
+  return s === undefined ? undefined : { [key]: s };
 }
 
 type ResolvedOptions = Required<Omit<EvalKitOptions, "baseUrl" | "apiUrl" | "environment" | "appVersion" | "deviceId">> & {
@@ -53,6 +64,7 @@ export class EvalKitClient {
       apiUrl: "https://api.syntropylabs.ai",
       environment: "",
       appVersion: "",
+      captureGlobalErrors: false,
       ...opts,
     };
 
@@ -202,37 +214,49 @@ export class EvalKitClient {
   ): T {
     const self = this;
     return function (this: any, ...args: any[]) {
-      const startAttrs: Record<string, string | number | boolean> = {
-        'evalkit.span_type': 'function_call',
-        ...attributes,
-      };
-      if (captureIO && args.length) startAttrs['function.args'] = safeIO(args);
+      // Tracing must NEVER prevent the host function from running. If span setup
+      // throws for any reason, fall back to calling the original untraced.
+      let ctx: OtelContext;
+      let end: (status?: 'OK' | 'ERROR', extra?: Record<string, string | number | boolean>) => void;
+      try {
+        const startAttrs: Record<string, string | number | boolean> = {
+          'evalkit.span_type': 'function_call',
+          ...attributes,
+          ...(captureIO && args.length ? ioAttr('function.args', args, captureIO) : undefined),
+        };
+        const s = self.startSpan(name, startAttrs);
+        ctx = s.ctx; end = s.end;
+      } catch {
+        return fn.apply(this, args);
+      }
 
-      const { ctx, end } = self.startSpan(name, startAttrs);
+      const safeEnd = (status: 'OK' | 'ERROR', extra?: Record<string, string | number | boolean>) => {
+        try { end(status, extra); } catch { /* never throw from tracing */ }
+      };
 
       let result: any;
       try {
         result = context.with(ctx, () => fn.apply(this, args));
       } catch (err: any) {
         const error = err instanceof Error ? err : new Error(String(err));
-        trace.getSpan(ctx)?.recordException(error);
-        end('ERROR', { 'error.message': error.message });
+        try { trace.getSpan(ctx)?.recordException(error); } catch { /* ignore */ }
+        safeEnd('ERROR', errorAttrs(error));
         throw err;
       }
 
       if (result && typeof result.then === 'function') {
         return result.then(
-          (v: any) => { end('OK', captureIO ? { 'function.result': safeIO(v) } : undefined); return v; },
+          (v: any) => { safeEnd('OK', ioAttr('function.result', v, captureIO)); return v; },
           (e: any) => {
             const error = e instanceof Error ? e : new Error(String(e));
-            trace.getSpan(ctx)?.recordException(error);
-            end('ERROR', { 'error.message': error.message });
+            try { trace.getSpan(ctx)?.recordException(error); } catch { /* ignore */ }
+            safeEnd('ERROR', errorAttrs(error));
             throw e;
           },
         ) as any;
       }
 
-      end('OK', captureIO ? { 'function.result': safeIO(result) } : undefined);
+      safeEnd('OK', ioAttr('function.result', result, captureIO));
       return result;
     } as T;
   }
@@ -250,41 +274,49 @@ export class EvalKitClient {
   ): T {
     const self = this;
     return function (this: any, ...args: any[]) {
-      const startAttrs: Record<string, string | number | boolean> = {
-        'evalkit.span_type': 'tool_call',
-        'tool.name': name,
-        'gen_ai.tool.name': name,
-        ...attributes,
-      };
-      if (captureIO && args.length) {
-        startAttrs['tool.arguments'] = safeIO(args.length === 1 ? args[0] : args);
+      let ctx: OtelContext;
+      let end: (status?: 'OK' | 'ERROR', extra?: Record<string, string | number | boolean>) => void;
+      try {
+        const startAttrs: Record<string, string | number | boolean> = {
+          'evalkit.span_type': 'tool_call',
+          'tool.name': name,
+          'gen_ai.tool.name': name,
+          ...attributes,
+          ...(captureIO && args.length ? ioAttr('tool.arguments', args.length === 1 ? args[0] : args, captureIO) : undefined),
+        };
+        const s = self.startSpan(name, startAttrs);
+        ctx = s.ctx; end = s.end;
+      } catch {
+        return fn.apply(this, args);
       }
 
-      const { ctx, end } = self.startSpan(name, startAttrs);
+      const safeEnd = (status: 'OK' | 'ERROR', extra?: Record<string, string | number | boolean>) => {
+        try { end(status, extra); } catch { /* never throw from tracing */ }
+      };
 
       let result: any;
       try {
         result = context.with(ctx, () => fn.apply(this, args));
       } catch (err: any) {
         const error = err instanceof Error ? err : new Error(String(err));
-        trace.getSpan(ctx)?.recordException(error);
-        end('ERROR', { 'error.message': error.message });
+        try { trace.getSpan(ctx)?.recordException(error); } catch { /* ignore */ }
+        safeEnd('ERROR', errorAttrs(error));
         throw err;
       }
 
       if (result && typeof result.then === 'function') {
         return result.then(
-          (v: any) => { end('OK', captureIO ? { 'tool.result': safeIO(v) } : undefined); return v; },
+          (v: any) => { safeEnd('OK', ioAttr('tool.result', v, captureIO)); return v; },
           (e: any) => {
             const error = e instanceof Error ? e : new Error(String(e));
-            trace.getSpan(ctx)?.recordException(error);
-            end('ERROR', { 'error.message': error.message });
+            try { trace.getSpan(ctx)?.recordException(error); } catch { /* ignore */ }
+            safeEnd('ERROR', errorAttrs(error));
             throw e;
           },
         ) as any;
       }
 
-      end('OK', captureIO ? { 'tool.result': safeIO(result) } : undefined);
+      safeEnd('OK', ioAttr('tool.result', result, captureIO));
       return result;
     } as T;
   }

@@ -30,42 +30,52 @@ export function patchMcp(client: EvalKitClient, target: any): void {
   const original = proto.callTool;
 
   proto.callTool = async function (this: unknown, ...args: unknown[]): Promise<unknown> {
-    const params = (args[0] ?? {}) as CallToolParams;
-    const name = String(params?.name ?? "tool");
-    const argsJson = truncate(toJson(params?.arguments ?? {}));
-    const ctx = otelContext.active();
-
-    const span = client.tracer.startSpan(
-      name,
-      {
-        kind: SpanKind.INTERNAL,
-        attributes: {
-          "evalkit.span_type": "tool_call",
-          "gen_ai.tool.name": name,
-          "gen_ai.tool.call.arguments": argsJson,
-          "mcp.tool.name": name,
-          "tool.name": name,
-          "tool.arguments": argsJson,
+    // Tracing must never break the tool call: if span setup throws, run untraced.
+    let span: ReturnType<typeof client.tracer.startSpan>;
+    let spanCtx: ReturnType<typeof trace.setSpan>;
+    try {
+      const params = (args[0] ?? {}) as CallToolParams;
+      const name = String(params?.name ?? "tool");
+      const argsJson = truncate(toJson(params?.arguments ?? {}));
+      const ctx = otelContext.active();
+      span = client.tracer.startSpan(
+        name,
+        {
+          kind: SpanKind.INTERNAL,
+          attributes: {
+            "evalkit.span_type": "tool_call",
+            "gen_ai.tool.name": name,
+            "gen_ai.tool.call.arguments": argsJson,
+            "mcp.tool.name": name,
+            "tool.name": name,
+            "tool.arguments": argsJson,
+          },
         },
-      },
-      ctx,
-    );
-    const spanCtx = trace.setSpan(ctx, span);
+        ctx,
+      );
+      spanCtx = trace.setSpan(ctx, span);
+    } catch {
+      return original.apply(this, args);
+    }
 
     try {
       const result = (await otelContext.with(spanCtx, () => original.apply(this, args))) as CallToolResult;
-      const text = resultText(result);
-      if (text) {
-        span.setAttribute("tool.result", text);
-        span.setAttribute("gen_ai.tool.call.result", text);
-      }
-      span.setStatus({ code: result?.isError ? SpanStatusCode.ERROR : SpanStatusCode.OK });
+      try {
+        const text = resultText(result);
+        if (text) {
+          span.setAttribute("tool.result", text);
+          span.setAttribute("gen_ai.tool.call.result", text);
+        }
+        span.setStatus({ code: result?.isError ? SpanStatusCode.ERROR : SpanStatusCode.OK });
+      } catch { /* never throw from tracing */ }
       span.end();
       return result;
     } catch (err) {
-      const e = err instanceof Error ? err : new Error(String(err));
-      span.recordException(e);
-      span.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
+      try {
+        const e = err instanceof Error ? err : new Error(String(err));
+        span.recordException(e);
+        span.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
+      } catch { /* ignore */ }
       span.end();
       throw err;
     }

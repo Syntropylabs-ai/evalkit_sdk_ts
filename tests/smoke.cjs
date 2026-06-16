@@ -22,7 +22,7 @@ server.listen(0, async () => {
   const mod = require("../dist/index.js");
   const evalkit = mod.default ?? mod;
 
-  evalkit.init({ subscriptionKey: "tk_test", baseUrl: `http://127.0.0.1:${port}`, serviceName: "smoke" });
+  const client = evalkit.init({ subscriptionKey: "tk_test", baseUrl: `http://127.0.0.1:${port}`, serviceName: "smoke" });
 
   // 1) evaluate()
   const r = evalkit.evaluate({
@@ -75,6 +75,33 @@ server.listen(0, async () => {
   }
   evalkit.patchMCPClient(FakeMCPClient);
   await new FakeMCPClient().callTool({ name: "add", arguments: { a: 1, b: 2 } });
+
+  // 2e) Prisma via instrumentPrisma() → db_query span
+  const fakePrisma = {
+    $extends(ext) {
+      const op = ext.query.$allOperations;
+      return { user: { count: () => op({ model: "User", operation: "count", args: {}, query: async () => 7 }) } };
+    },
+  };
+  const prisma = evalkit.instrumentPrisma(fakePrisma, { system: "mongodb" });
+  const prismaCount = await prisma.user.count();
+  assert.strictEqual(prismaCount, 7, "instrumentPrisma passes through the result");
+
+  // 2f) Gemini Live via traceLive() → voice.session + voice.turn spans
+  let liveOnMessage;
+  const fakeAi = { live: { connect: async (p) => { liveOnMessage = p.callbacks.onmessage; return { sendRealtimeInput() {}, close() {} }; } } };
+  const liveSession = await evalkit.traceLive(fakeAi, { model: "gemini-live", callbacks: {} }, { sessionId: "voice_1" });
+  liveOnMessage({ serverContent: { modelTurn: { parts: [{ text: "hello there" }] }, turnComplete: true } });
+  liveSession.close();
+
+  // 2g) traceFunction: undefined result not captured + tracing never crashes the host
+  evalkit.traceFunction("voidFn", () => undefined)();
+  const crashFn = evalkit.traceFunction("crashFn", () => 99);
+  const origStartSpan = client.startSpan.bind(client);
+  client.startSpan = () => { throw new Error("boom"); };
+  const crashRes = crashFn();
+  client.startSpan = origStartSpan;
+  assert.strictEqual(crashRes, 99, "host fn returns even when tracing setup throws");
 
   // 3) langchainHandler() — no langchain installed → null, no crash
   const lh = await evalkit.langchainHandler();
@@ -159,6 +186,18 @@ server.listen(0, async () => {
     assert.ok(mcpSpan, "mcp tool_call span emitted");
     assert.strictEqual(mcpSpan.attributes["mcp.tool.name"], "add", "mcp.tool.name attr");
     assert.strictEqual(mcpSpan.attributes["tool.result"], "sum=42", "mcp tool result captured");
+
+    const dbq = captured.filter((e) => e.spanType === "db_query");
+    assert.ok(dbq.some((d) => d.operation === "User.count"), "prisma db_query span emitted");
+
+    const voiceTurn = captured.find((e) => e.operation === "voice.turn");
+    assert.ok(voiceTurn, "voice.turn span emitted");
+    assert.ok((voiceTurn.completion || voiceTurn.attributes?.["evalkit.completion"] || "").includes("hello"), "voice turn captured model text");
+    assert.ok(captured.some((e) => e.operation === "voice.session"), "voice.session span emitted");
+
+    const vfSpan = captured.find((e) => e.operation === "voidFn");
+    assert.ok(vfSpan, "voidFn function_call span emitted");
+    assert.ok(!("function.result" in (vfSpan.attributes || {})), "undefined result is not stored as a span attribute");
 
     console.log(`OK — ${captured.length} spans captured; all TS smoke assertions passed`);
     process.exit(0);

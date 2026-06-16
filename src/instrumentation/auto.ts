@@ -7,6 +7,7 @@ import { patchAnthropicVertex, patchVertexGenerativeModel } from './llm/vertex-a
 import { patchCohere } from './llm/cohere/index.js';
 import { patchGoogleAI } from './llm/google-ai/index.js';
 import { patchGoogleGenAI } from './llm/google-genai/index.js';
+import { patchGoogleLive } from './llm/google-live.js';
 import { patchMongoose } from './db/mongoose.js';
 import { patchPg } from './db/pg.js';
 import { patchMysql2 } from './db/mysql2.js';
@@ -225,6 +226,52 @@ async function tryPatchLangChainAsync(client: EvalKitClient): Promise<void> {
   } catch {}
 }
 
+async function tryPatchGoogleLiveAsync(client: EvalKitClient): Promise<void> {
+  // @google/genai Live (voice over WebSocket) — patch Live.prototype.connect.
+  try {
+    const _req = getRequire();
+    const mod = _req('@google/genai');
+    const Live = mod.Live ?? mod.default?.Live;
+    if (Live?.prototype?.connect) { patchGoogleLive(client, Live); return; }
+  } catch {}
+  try {
+    const mod = await dynImport('@google/genai');
+    const Live = mod.Live ?? mod.default?.Live;
+    if (Live?.prototype?.connect) patchGoogleLive(client, Live);
+  } catch {}
+}
+
+
+const OTEL_INSTRUMENTATIONS: Array<[string, string]> = [
+  ['@prisma/instrumentation', 'PrismaInstrumentation'],
+  ['@opentelemetry/instrumentation-mongodb', 'MongoDBInstrumentation'],
+  ['@opentelemetry/instrumentation-mongoose', 'MongooseInstrumentation'],
+  ['@opentelemetry/instrumentation-ioredis', 'IORedisInstrumentation'],
+  ['@opentelemetry/instrumentation-redis-4', 'RedisInstrumentation'],
+  ['@opentelemetry/instrumentation-pg', 'PgInstrumentation'],
+  ['@opentelemetry/instrumentation-mysql2', 'MySQL2Instrumentation'],
+  ['@opentelemetry/instrumentation-undici', 'UndiciInstrumentation'],
+  ['@opentelemetry/instrumentation-graphql', 'GraphQLInstrumentation'],
+  ['@opentelemetry/instrumentation-nestjs-core', 'NestInstrumentation'],
+];
+
+async function tryRegisterOtelInstrumentations(): Promise<void> {
+  // Each step is independently guarded — one missing/broken package never breaks
+  // the others or the host app.
+  try {
+    const reg = (await dynImport('@opentelemetry/instrumentation'))?.registerInstrumentations;
+    if (!reg) return;
+    const instrumentations: unknown[] = [];
+    for (const [mod, cls] of OTEL_INSTRUMENTATIONS) {
+      try {
+        const C = (await dynImport(mod))?.[cls];
+        if (C) instrumentations.push(new C());
+      } catch { /* not installed — skip */ }
+    }
+    if (instrumentations.length) reg({ instrumentations });
+  } catch { /* @opentelemetry/instrumentation absent — skip */ }
+}
+
 async function tryPatchMcpAsync(client: EvalKitClient): Promise<void> {
   // @modelcontextprotocol/sdk — patch Client.prototype.callTool → tool_call span.
   try {
@@ -261,6 +308,8 @@ export function setupAutoInstrumentation(client: EvalKitClient): void {
     tryPatchGoogleGenAIAsync(client),
     tryPatchGroqAsync(client),
     tryPatchLangChainAsync(client),
+    tryPatchGoogleLiveAsync(client),
+    tryRegisterOtelInstrumentations(),
     tryPatchMcpAsync(client),
     tryPatchPgAsync(client),
     tryPatchMysql2Async(client),

@@ -140,7 +140,7 @@ export class EvalKitExporter implements SpanExporter {
       spanId: ctx.spanId,
       parentSpanId: span.parentSpanId,
       spanKind: spanKindName(span.kind),
-      spanType: (attrs["evalkit.span_type"] as TraceEnvelope["spanType"]) ?? "log",
+      spanType: (attrs["evalkit.span_type"] as TraceEnvelope["spanType"]) ?? inferSpanType(span, attrs),
       status: otelStatusToString(span.status.code),
       statusMessage: span.status.message,
       serviceName: span.resource.attributes["service.name"] as string | undefined,
@@ -175,6 +175,18 @@ export class EvalKitExporter implements SpanExporter {
 
     return envelope;
   }
+}
+
+// Categorize spans from third-party OpenTelemetry instrumentations (Prisma,
+// mongodb, ioredis, http…) that don't carry our `evalkit.span_type`. Lets a
+// single init() pick up the whole OTel ecosystem with sensible types.
+function inferSpanType(span: ReadableSpan, attrs: Record<string, unknown>): TraceEnvelope["spanType"] {
+  if (attrs["db.system"] || attrs["db.statement"] || attrs["db.operation"] || attrs["db.mongodb.collection"]) return "db_query";
+  if (attrs["http.method"] || attrs["http.request.method"] || attrs["url.full"] || attrs["http.url"]) return "http_call";
+  const scope = String((span as any).instrumentationScope?.name ?? (span as any).instrumentationLibrary?.name ?? "").toLowerCase();
+  if (/prisma|mongo|redis|mysql|postgres|\bpg\b|sql|cassandra|dynamo/.test(scope)) return "db_query";
+  if (/http|fetch|undici|axios|grpc|got|request/.test(scope)) return "http_call";
+  return "log";
 }
 
 // Guarantee a span serializes to <= MAX_SPAN_BYTES so it can always be ingested.

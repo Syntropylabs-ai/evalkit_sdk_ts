@@ -1,45 +1,50 @@
 import { trace, context as otelContext, SpanKind, SpanStatusCode } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
+import { errorAttrs } from '../../core/errors-util.js';
+
+let _installed = false;
 
 function emitErrorSpan(client: EvalKitClient, eventName: string, error: Error): void {
-  // Attach to the active span if one is recording; otherwise create a standalone
-  // root span so background errors are never silently dropped.
-  const active = trace.getActiveSpan();
-  if (active?.isRecording()) {
-    active.addEvent(eventName, {
-      'error.message': error.message,
-      'error.stack': error.stack ?? '',
+  try {
+
+    const attrs = {
+      ...errorAttrs(error),
       'log.level': 'ERROR',
       'log.message': `${eventName}: ${error.message}`,
-    });
-    active.recordException(error);
-    active.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-  } else {
-    const span = client.tracer.startSpan(eventName, {
-      kind: SpanKind.INTERNAL,
-      attributes: {
-        'evalkit.span_type': 'log',
-        'log.level': 'ERROR',
-        'log.message': `${eventName}: ${error.message}`,
-        'error.message': error.message,
-        'error.stack': error.stack ?? '',
-      },
-    }, otelContext.active());
-    span.recordException(error);
-    span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-    span.end();
-  }
+    };
+    const active = trace.getActiveSpan();
+    if (active?.isRecording()) {
+      active.addEvent(eventName, attrs);
+      active.recordException(error);
+      active.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+    } else {
+      const span = client.tracer.startSpan(eventName, {
+        kind: SpanKind.INTERNAL,
+        attributes: { 'evalkit.span_type': 'log', ...attrs },
+      }, otelContext.active());
+      span.recordException(error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+      span.end();
+    }
+  } catch { /* tracing must never throw, least of all from an error handler */ }
 }
 
 export function patchErrors(client: EvalKitClient): void {
   if (typeof process === 'undefined') return;
+  if (!client.options.captureGlobalErrors) return;
+  if (_installed) return;
+  _installed = true;
 
   process.on('unhandledRejection', (reason: unknown) => {
-    const error = reason instanceof Error ? reason : new Error(String(reason));
-    emitErrorSpan(client, 'error.unhandled_rejection', error);
+    emitErrorSpan(client, 'error.unhandled_rejection', reason instanceof Error ? reason : new Error(String(reason)));
   });
 
-  process.on('uncaughtException', (err: Error) => {
+  // prependListener so we record before the host's handlers; if EvalKit is the ONLY
+  // listener the host expected a crash, so re-exit to preserve default behavior.
+  process.prependListener('uncaughtException', (err: Error) => {
     emitErrorSpan(client, 'error.uncaught_exception', err instanceof Error ? err : new Error(String(err)));
+    if (process.listenerCount('uncaughtException') === 1) {
+      setImmediate(() => process.exit(1));
+    }
   });
 }

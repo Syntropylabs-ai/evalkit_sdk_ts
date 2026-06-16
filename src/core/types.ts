@@ -91,4 +91,11 @@ export interface EvalKitOptions {
   appVersion?: string;
   /** stable identifier for the originating client/device (e.g. browser fingerprint, machine ID) */
   deviceId?: string;
+  /**
+   * Install global process error hooks (uncaughtException / unhandledRejection).
+   * Default: false — installing an uncaughtException listener changes Node's crash
+   * semantics (the process stops exiting on fatal errors), which the host never
+   * opted into. When true, EvalKit records the error AND preserves the host's exit.
+   */
+  captureGlobalErrors?: boolean;
 }

@@ -24,6 +24,8 @@ import { createHapiPlugin } from "./frameworks/hapi/plugin.js";
 import { EvalKitInterceptor } from "./frameworks/nestjs/interceptor.js";
 import { autoTraceNest as _autoTraceNest } from "./frameworks/nestjs/autotrace.js";
 import { patchMcp as _patchMcp } from "./instrumentation/mcp.js";
+import { instrumentPrisma as _instrumentPrisma } from "./instrumentation/db/prisma.js";
+import { traceLive as _traceLive } from "./instrumentation/llm/google-live.js";
 import { setupAutoInstrumentation } from "./instrumentation/auto.js";
 import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitOptions } from "./core/types.js";
@@ -129,6 +131,16 @@ export function patchMysql2Client(mysqlInstance: any): void {
 
 export function patchMCPClient(mcpClientClassOrInstance: any): void {
   _patchMcp(getInstance(), mcpClientClassOrInstance);
+}
+
+// Prisma: returns an instrumented client (db_query spans). Use the returned value.
+export function instrumentPrisma<T = any>(prisma: T, opts?: { system?: string }): T {
+  return _instrumentPrisma(getInstance(), prisma, opts) as T;
+}
+
+// Gemini Live (voice over WebSocket): drop-in for `ai.live.connect(params)`.
+export function traceLive(ai: any, params: any, opts?: { sessionId?: string; userId?: string }): Promise<any> {
+  return _traceLive(getInstance(), ai, params, opts);
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +399,8 @@ export default {
   patchPgClient,
   patchMysql2Client,
   patchMCPClient,
+  instrumentPrisma,
+  traceLive,
   // Framework integrations
   expressMiddleware,
   fastifyPlugin,
