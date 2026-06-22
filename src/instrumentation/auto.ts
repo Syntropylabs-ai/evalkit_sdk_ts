@@ -18,7 +18,15 @@ import { patchMcp } from './mcp.js';
 import { patchConsole } from './runtime/console.js';
 import { patchErrors } from './runtime/errors.js';
 
+/** True if an OTel community instrumentation package is installed. When it is, our
+ *  hand-rolled patch for the same library steps aside so the same call isn't traced
+ *  twice — the OTel-native path wins. */
+function otelInstalled(pkg: string): boolean {
+  try { getRequire().resolve(pkg); return true; } catch { return false; }
+}
+
 function tryPatchMongoose(client: EvalKitClient): void {
+  if (otelInstalled('@opentelemetry/instrumentation-mongoose')) return;
   const mongoose = loadIfAlreadyRequired('mongoose');
   if (mongoose) patchMongoose(client, mongoose);
 }
@@ -31,6 +39,7 @@ function tryPatchAxios(client: EvalKitClient): void {
 async function tryPatchPgAsync(client: EvalKitClient): Promise<void> {
   // Patch pg.Client.prototype.query — covers node-postgres Client AND Pool
   // (Pool.query delegates to a Client), and ORMs on top (TypeORM, Sequelize, Knex).
+  if (otelInstalled('@opentelemetry/instrumentation-pg')) return;
   try {
     const _req = getRequire();
     const pg = _req('pg');
@@ -46,6 +55,7 @@ async function tryPatchPgAsync(client: EvalKitClient): Promise<void> {
 
 async function tryPatchMysql2Async(client: EvalKitClient): Promise<void> {
   // Patch mysql2 Connection prototype — covers callback + promise APIs and pools.
+  if (otelInstalled('@opentelemetry/instrumentation-mysql2')) return;
   try {
     const _req = getRequire();
     const mysql = _req('mysql2');
@@ -62,6 +72,7 @@ async function tryPatchMysql2Async(client: EvalKitClient): Promise<void> {
 async function tryPatchIoredisAsync(client: EvalKitClient): Promise<void> {
   // ioredis exports the Redis class (stable prototype.sendCommand). node-redis v4
   // builds commands dynamically per-instance → use the manual patchRedisClient there.
+  if (otelInstalled('@opentelemetry/instrumentation-ioredis')) return;
   try {
     const _req = getRequire();
     const mod = _req('ioredis');
@@ -256,20 +267,24 @@ const OTEL_INSTRUMENTATIONS: Array<[string, string]> = [
 ];
 
 async function tryRegisterOtelInstrumentations(): Promise<void> {
-  // Each step is independently guarded — one missing/broken package never breaks
-  // the others or the host app.
   try {
     const reg = (await dynImport('@opentelemetry/instrumentation'))?.registerInstrumentations;
     if (!reg) return;
-    const instrumentations: unknown[] = [];
-    for (const [mod, cls] of OTEL_INSTRUMENTATIONS) {
-      try {
-        const C = (await dynImport(mod))?.[cls];
-        if (C) instrumentations.push(new C());
-      } catch { /* not installed — skip */ }
+    let instrumentations: unknown[] = [];
+    try {
+      const getAll = (await dynImport('@opentelemetry/auto-instrumentations-node'))?.getNodeAutoInstrumentations;
+      if (getAll) instrumentations = getAll({ '@opentelemetry/instrumentation-fs': { enabled: false } });
+    } catch {}
+    if (!instrumentations.length) {
+      for (const [mod, cls] of OTEL_INSTRUMENTATIONS) {
+        try {
+          const C = (await dynImport(mod))?.[cls];
+          if (C) instrumentations.push(new C());
+        } catch {}
+      }
     }
     if (instrumentations.length) reg({ instrumentations });
-  } catch { /* @opentelemetry/instrumentation absent — skip */ }
+  } catch {}
 }
 
 async function tryPatchMcpAsync(client: EvalKitClient): Promise<void> {
@@ -288,15 +303,16 @@ async function tryPatchMcpAsync(client: EvalKitClient): Promise<void> {
 }
 
 export function setupAutoInstrumentation(client: EvalKitClient): void {
-  try { patchIncomingHttp(client); } catch { /* skip if http sealed */ }
-  try { patchHttp(client); } catch { /* sealed ESM namespace — skip */ }
-  patchFetch();
+  const otelHttp = otelInstalled('@opentelemetry/auto-instrumentations-node');
+  if (!otelHttp) {
+    try { patchIncomingHttp(client); } catch {}
+    try { patchHttp(client); } catch {}
+    patchFetch();
+    tryPatchAxios(client);
+  }
   patchConsole(client);
   patchErrors(client);
   tryPatchMongoose(client);
-  tryPatchAxios(client);
-  // Fire-and-forget — resolve in next microtask (module already cached),
-  // done long before any real HTTP request arrives.
   Promise.all([
     tryPatchOpenAIAsync(client),
     tryPatchAnthropicAsync(client),

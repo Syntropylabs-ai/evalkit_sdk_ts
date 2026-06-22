@@ -2,7 +2,7 @@ import { trace, context, SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import type { Tracer, Context as OtelContext } from "@opentelemetry/api";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
-import { Resource } from "@opentelemetry/resources";
+import { resourceFromAttributes } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import type { EvalKitOptions } from "./types.js";
 import { EvalKitExporter } from "./exporter.js";
@@ -75,7 +75,7 @@ export class EvalKitClient {
     });
 
     this.provider = new NodeTracerProvider({
-      resource: new Resource({
+      resource: resourceFromAttributes({
         [ATTR_SERVICE_NAME]: this.options.serviceName,
       }),
       spanProcessors: [
