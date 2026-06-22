@@ -8,7 +8,7 @@ import type { EvalKitOptions } from "./types.js";
 import { EvalKitExporter } from "./exporter.js";
 import { errorAttrs } from "./errors-util.js";
 
-const SDK_VERSION = "0.1.32";
+const SDK_VERSION = "0.2.0";
 
 const IO_MAX = 4096;
 
