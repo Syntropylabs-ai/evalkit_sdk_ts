@@ -5,6 +5,20 @@ import { _evalkitAxiosSpanMap } from '../../utils/axios-span-map.js';
 
 const SKIP_PATTERNS = [/\/v1\/ingest/, /\/health(z)?$/];
 
+function safeStringify(v: any): string | undefined {
+  try { return JSON.stringify(v); } catch { return undefined; }
+}
+
+function captureBody(data: any, max: number): string | undefined {
+  if (data === undefined || data === null) return undefined;
+  if (typeof data === 'string') return data.slice(0, max);
+  if (typeof data.pipe === 'function' || typeof data.read === 'function') return undefined;
+  if (typeof Buffer !== 'undefined' && Buffer.isBuffer(data)) return undefined;
+  if (data instanceof ArrayBuffer) return undefined;
+  const s = safeStringify(data);
+  return s === undefined ? undefined : s.slice(0, max);
+}
+
 export function patchAxios(client: EvalKitClient, axiosInstance: any): void {
   if ((axiosInstance as any).__evalkit_axios) return;
   (axiosInstance as any).__evalkit_axios = true;
@@ -31,6 +45,8 @@ export function patchAxios(client: EvalKitClient, axiosInstance: any): void {
 
     const method = (config.method ?? 'get').toUpperCase();
     const reqHeaders = sanitizeHeaders(config.headers ?? {});
+    const reqHeadersStr = Object.keys(reqHeaders).length ? safeStringify(reqHeaders) : undefined;
+    const reqBody = captureBody(config.data, client.options.maxBodyBytes);
 
     const span = client.tracer.startSpan(`${method} ${pathname}`, {
       kind: SpanKind.CLIENT,
@@ -38,12 +54,8 @@ export function patchAxios(client: EvalKitClient, axiosInstance: any): void {
         'evalkit.span_type': 'http_call',
         'http.method': method,
         'http.url': url,
-        ...(Object.keys(reqHeaders).length
-          ? { 'http.request.headers': JSON.stringify(reqHeaders) }
-          : {}),
-        ...(config.data !== undefined
-          ? { 'http.request.body': typeof config.data === 'string' ? config.data.slice(0, client.options.maxBodyBytes) : JSON.stringify(config.data).slice(0, client.options.maxBodyBytes) }
-          : {}),
+        ...(reqHeadersStr ? { 'http.request.headers': reqHeadersStr } : {}),
+        ...(reqBody !== undefined ? { 'http.request.body': reqBody } : {}),
       },
     }, otelContext.active());
 
@@ -64,14 +76,11 @@ export function patchAxios(client: EvalKitClient, axiosInstance: any): void {
       if (response.config?.__evalkitSpanId) _evalkitAxiosSpanMap.delete(response.config.__evalkitSpanId);
       if (span) {
         const respHeaders = sanitizeHeaders(response.headers ?? {});
-        const respData = response.data;
-        let respBody: string | undefined;
-        if (respData !== undefined && respData !== null) {
-          respBody = (typeof respData === 'string' ? respData : JSON.stringify(respData)).slice(0, client.options.maxBodyBytes);
-        }
+        const respHeadersStr = Object.keys(respHeaders).length ? safeStringify(respHeaders) : undefined;
+        const respBody = captureBody(response.data, client.options.maxBodyBytes);
         span.setAttributes({
           'http.status_code': response.status,
-          ...(Object.keys(respHeaders).length ? { 'http.response.headers': JSON.stringify(respHeaders) } : {}),
+          ...(respHeadersStr ? { 'http.response.headers': respHeadersStr } : {}),
           ...(respBody !== undefined ? { 'http.response.body': respBody } : {}),
         });
         span.setStatus({ code: SpanStatusCode.OK });
@@ -85,15 +94,12 @@ export function patchAxios(client: EvalKitClient, axiosInstance: any): void {
       if (span) {
         const sc = err.response?.status ?? 0;
         const respHeaders = sanitizeHeaders(err.response?.headers ?? {});
-        const errData = err.response?.data;
-        let errBody: string | undefined;
-        if (errData !== undefined && errData !== null) {
-          errBody = (typeof errData === 'string' ? errData : JSON.stringify(errData)).slice(0, client.options.maxBodyBytes);
-        }
+        const respHeadersStr = Object.keys(respHeaders).length ? safeStringify(respHeaders) : undefined;
+        const errBody = captureBody(err.response?.data, client.options.maxBodyBytes);
         span.setAttributes({
           'http.status_code': sc,
           'error.message': err.message,
-          ...(Object.keys(respHeaders).length ? { 'http.response.headers': JSON.stringify(respHeaders) } : {}),
+          ...(respHeadersStr ? { 'http.response.headers': respHeadersStr } : {}),
           ...(errBody !== undefined ? { 'http.response.body': errBody } : {}),
         });
         span.recordException(err instanceof Error ? err : new Error(String(err)));

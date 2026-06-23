@@ -135,6 +135,7 @@ export class EvalKitExporter implements SpanExporter {
       attributes: e.attributes as Record<string, string | number | boolean>,
     }));
 
+    const foreignLlm = !COUNT_FOREIGN_LLM && isForeignGenAi(attrs);
     const envelope: TraceEnvelope = {
       traceId: ctx.traceId,
       spanId: ctx.spanId,
@@ -142,7 +143,7 @@ export class EvalKitExporter implements SpanExporter {
       // older exposes parentSpanId. Read whichever exists (cast — type varies by version).
       parentSpanId: (span as any).parentSpanContext?.spanId ?? (span as any).parentSpanId,
       spanKind: spanKindName(span.kind),
-      spanType: (attrs["evalkit.span_type"] as TraceEnvelope["spanType"]) ?? inferSpanType(span, attrs),
+      spanType: (attrs["evalkit.span_type"] as TraceEnvelope["spanType"]) ?? (foreignLlm ? "function_call" : inferSpanType(span, attrs)),
       status: otelStatusToString(span.status.code),
       statusMessage: span.status.message,
       serviceName: span.resource.attributes["service.name"] as string | undefined,
@@ -151,8 +152,8 @@ export class EvalKitExporter implements SpanExporter {
       provider: attrs["gen_ai.system"] as string | undefined,
       prompt: attrs["evalkit.prompt"] as string | undefined,
       completion: attrs["evalkit.completion"] as string | undefined,
-      tokensIn: Math.round((attrs["gen_ai.usage.input_tokens"] as number) || 0) || undefined,
-      tokensOut: Math.round((attrs["gen_ai.usage.output_tokens"] as number) || 0) || undefined,
+      tokensIn: foreignLlm ? undefined : (Math.round((attrs["gen_ai.usage.input_tokens"] as number) || 0) || undefined),
+      tokensOut: foreignLlm ? undefined : (Math.round((attrs["gen_ai.usage.output_tokens"] as number) || 0) || undefined),
       latencyMs: Math.round(endMs - startMs),
       startTime: new Date(startMs).toISOString(),
       endTime: new Date(endMs).toISOString(),
@@ -177,6 +178,21 @@ export class EvalKitExporter implements SpanExporter {
 
     return envelope;
   }
+}
+
+// Opt-out: EVALKIT_COUNT_FOREIGN_LLM=1 keeps foreign OTel gen_ai spans as cost-bearing.
+const COUNT_FOREIGN_LLM = process.env.EVALKIT_COUNT_FOREIGN_LLM === "1" || process.env.EVALKIT_COUNT_FOREIGN_LLM === "true";
+
+// A foreign/bridged OTel GenAI span (framework or community instrumentation) carries
+// gen_ai.* but no evalkit.span_type. EvalKit's own native llm_call span is the single
+// source of cost truth, so foreign ones are downgraded to function_call with tokens dropped.
+function isForeignGenAi(attrs: Record<string, unknown>): boolean {
+  if (attrs["evalkit.span_type"] !== undefined) return false;
+  return attrs["gen_ai.system"] !== undefined
+      || attrs["gen_ai.usage.input_tokens"] !== undefined
+      || attrs["gen_ai.usage.output_tokens"] !== undefined
+      || attrs["gen_ai.operation.name"] !== undefined
+      || attrs["gen_ai.request.model"] !== undefined;
 }
 
 // Categorize spans from third-party OpenTelemetry instrumentations (Prisma,
