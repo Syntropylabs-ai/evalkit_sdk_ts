@@ -303,13 +303,10 @@ async function tryPatchMcpAsync(client: EvalKitClient): Promise<void> {
 }
 
 export function setupAutoInstrumentation(client: EvalKitClient): void {
-  const otelHttp = otelInstalled('@opentelemetry/auto-instrumentations-node');
-  if (!otelHttp) {
-    try { patchIncomingHttp(client); } catch {}
-    try { patchHttp(client); } catch {}
-    patchFetch();
-    tryPatchAxios(client);
-  }
+  try { patchIncomingHttp(client); } catch {}
+  try { patchHttp(client); } catch {}
+  patchFetch();
+  tryPatchAxios(client);
   patchConsole(client);
   patchErrors(client);
   tryPatchMongoose(client);

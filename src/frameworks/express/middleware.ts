@@ -11,6 +11,7 @@ export function createExpressMiddleware(
   options?: ExpressMiddlewareOptions,
 ): (req: any, res: any, next: any) => void {
   return (req: any, res: any, next: any) => {
+    if (req._evalkitCtx || otelTrace.getActiveSpan()?.isRecording()) return next();
     const traceName = typeof options?.name === 'function'
       ? options.name(req)
       : (options?.name ?? `${String(req.method)} ${String(req.route?.path ?? req.path ?? req.url)}`);

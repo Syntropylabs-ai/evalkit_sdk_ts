@@ -1,6 +1,6 @@
 {
   "name": "syntropylabs-evalkit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "EvalKit TypeScript SDK — OpenTelemetry-based LLM observability and tracing",
   "license": "LicenseRef-Proprietary",
   "author": "Syntropy Labs",
@@ -76,19 +76,45 @@
     "ioredis": "*"
   },
   "peerDependenciesMeta": {
-    "openai": { "optional": true },
-    "@anthropic-ai/sdk": { "optional": true },
-    "@aws-sdk/client-bedrock-runtime": { "optional": true },
-    "cohere-ai": { "optional": true },
-    "@google/generative-ai": { "optional": true },
-    "@google/genai": { "optional": true },
-    "@google-cloud/vertexai": { "optional": true },
-    "@langchain/core": { "optional": true },
-    "groq-sdk": { "optional": true },
-    "pg": { "optional": true },
-    "mysql2": { "optional": true },
-    "mongoose": { "optional": true },
-    "ioredis": { "optional": true }
+    "openai": {
+      "optional": true
+    },
+    "@anthropic-ai/sdk": {
+      "optional": true
+    },
+    "@aws-sdk/client-bedrock-runtime": {
+      "optional": true
+    },
+    "cohere-ai": {
+      "optional": true
+    },
+    "@google/generative-ai": {
+      "optional": true
+    },
+    "@google/genai": {
+      "optional": true
+    },
+    "@google-cloud/vertexai": {
+      "optional": true
+    },
+    "@langchain/core": {
+      "optional": true
+    },
+    "groq-sdk": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    },
+    "mysql2": {
+      "optional": true
+    },
+    "mongoose": {
+      "optional": true
+    },
+    "ioredis": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
