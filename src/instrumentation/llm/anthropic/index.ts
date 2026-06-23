@@ -2,6 +2,7 @@ import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opente
 import type { Span, Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
 import { emitToolCalls, fromAnthropicBlocks } from "../_toolcalls.js";
+import { safeBody } from "../_body.js";
 
 type AnthropicMessages = Array<{ role: string; content: string }>;
 type ContentBlock = { type: string; text?: string; id?: string; name?: string; input?: unknown };
@@ -65,6 +66,8 @@ function wrapAnthropicStream(stream: any, span: Span): any {
         'gen_ai.usage.output_tokens': tokensOut,
         'gen_ai.streaming': true,
       });
+      const body = safeBody({ text: content });
+      if (body) span.setAttribute('gen_ai.response.body', body);
       span.setStatus({ code: SpanStatusCode.OK });
     }
     span.end();
@@ -136,6 +139,9 @@ export function patchAnthropic(
       ctx
     );
 
+    const reqBody = safeBody(params);
+    if (reqBody) span.setAttribute("gen_ai.request.body", reqBody);
+
     const spanCtx = trace.setSpan(ctx, span);
 
     // Streaming path — wrap the stream to accumulate content and end span on exhaustion
@@ -177,6 +183,9 @@ export function patchAnthropic(
       "gen_ai.response.finish_reasons": result.stop_reason ? [result.stop_reason] : [],
       "evalkit.completion": textContent,
     });
+
+    const respBody = safeBody(result);
+    if (respBody) span.setAttribute("gen_ai.response.body", respBody);
 
     // Tool calls -> event on this span + child tool_call span + sim record (one path).
     emitToolCalls(client, span, fromAnthropicBlocks(result.content));

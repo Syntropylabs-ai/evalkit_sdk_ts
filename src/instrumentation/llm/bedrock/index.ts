@@ -1,6 +1,7 @@
 import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opentelemetry/api";
 import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
+import { safeBody } from "../_body.js";
 
 // Matches @aws-sdk/client-bedrock-runtime ConverseCommand input/output shapes
 type ConverseInput = {
@@ -73,6 +74,9 @@ export function patchBedrock(
       ctx
     );
 
+    const reqBody = safeBody(input);
+    if (reqBody) span.setAttribute('gen_ai.request.body', reqBody);
+
     const spanCtx = trace.setSpan(ctx, span);
 
     let result: ConverseOutput;
@@ -98,6 +102,9 @@ export function patchBedrock(
       'gen_ai.response.finish_reasons': result.stopReason ? [result.stopReason] : [],
       'evalkit.completion': completionText,
     });
+
+    const respBody = safeBody(result);
+    if (respBody) span.setAttribute('gen_ai.response.body', respBody);
 
     span.setStatus({ code: SpanStatusCode.OK });
     span.end();

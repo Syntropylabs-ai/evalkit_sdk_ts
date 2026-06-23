@@ -1,6 +1,7 @@
 import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opentelemetry/api";
 import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
+import { safeBody } from "../_body.js";
 
 // Matches cohere-ai v2 SDK: client.chat({ model, message, chatHistory, ... })
 type ChatParams = {
@@ -60,6 +61,9 @@ export function patchCohere(
       ctx
     );
 
+    const reqBody = safeBody(params);
+    if (reqBody) span.setAttribute('gen_ai.request.body', reqBody);
+
     const spanCtx = trace.setSpan(ctx, span);
 
     let result: ChatResponse;
@@ -81,6 +85,9 @@ export function patchCohere(
       'gen_ai.response.finish_reasons': result.finishReason ? [result.finishReason] : [],
       'evalkit.completion': result.text ?? '',
     });
+
+    const respBody = safeBody(result);
+    if (respBody) span.setAttribute('gen_ai.response.body', respBody);
 
     span.setStatus({ code: SpanStatusCode.OK });
     span.end();

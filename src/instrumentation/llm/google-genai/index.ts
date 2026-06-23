@@ -2,6 +2,7 @@ import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opente
 import type { Span, Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
 import { emitToolCalls, fromGoogleParts } from "../_toolcalls.js";
+import { safeBody } from "../_body.js";
 
 // New unified Google SDK: `@google/genai`.
 //   const ai = new GoogleGenAI({ apiKey });
@@ -112,6 +113,8 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
         },
         ctx,
       );
+      const reqBody = safeBody(req);
+      if (reqBody) span.setAttribute("gen_ai.request.body", reqBody);
       const spanCtx = trace.setSpan(ctx, span);
       let result: GenAIResponse;
       try {
@@ -130,6 +133,8 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
         "gen_ai.usage.total_tokens": result?.usageMetadata?.totalTokenCount ?? 0,
         "evalkit.completion": completionFrom(result),
       });
+      const respBody = safeBody(result);
+      if (respBody) span.setAttribute("gen_ai.response.body", respBody);
       try { recordToolCalls(result, span, span.spanContext().traceId); } catch { /* never break */ }
       span.setStatus({ code: SpanStatusCode.OK });
       span.end();
@@ -158,6 +163,8 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
         },
         ctx,
       );
+      const reqBody = safeBody(req);
+      if (reqBody) span.setAttribute("gen_ai.request.body", reqBody);
       const spanCtx = trace.setSpan(ctx, span);
       let stream: AsyncIterable<GenAIResponse>;
       try {
@@ -193,6 +200,8 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
             "gen_ai.usage.output_tokens": tout,
             "evalkit.completion": parts.join(""),
           });
+          const respBody = safeBody({ text: parts.join("") });
+          if (respBody) span.setAttribute("gen_ai.response.body", respBody);
           span.setStatus({ code: SpanStatusCode.OK });
         } catch (err) {
           const error = err instanceof Error ? err : new Error(String(err));

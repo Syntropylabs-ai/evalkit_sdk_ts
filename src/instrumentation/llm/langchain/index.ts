@@ -3,6 +3,7 @@ import type { Span, Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
 import { recordSimToolCall } from "../../../core/simulation.js";
 import { emitToolCalls, fromLangChainResult } from "../_toolcalls.js";
+import { safeBody } from "../_body.js";
 import { dynImport } from "../../../utils/dynimport.js";
 
 // LangChain / LangGraph instrumentation for the TS SDK.
@@ -141,18 +142,22 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
 
     handleLLMStart(llm: any, prompts: string[], runId: string, parentRunId?: string, extraParams?: any) {
       const model = modelFrom(llm, extraParams);
+      const reqBody = safeBody({ prompts: prompts ?? [], invocation_params: extraParams?.invocation_params });
       startRun(runId, parentRunId, "llm_call", "llm.generate", {
         "gen_ai.request.model": model,
         "gen_ai.system": providerFrom(llm) ?? "",
         "evalkit.prompt": truncate((prompts ?? []).join("\n")),
+        ...(reqBody ? { "gen_ai.request.body": reqBody } : {}),
       });
     },
     handleChatModelStart(llm: any, messages: any, runId: string, parentRunId?: string, extraParams?: any) {
       const model = modelFrom(llm, extraParams);
+      const reqBody = safeBody({ messages, invocation_params: extraParams?.invocation_params });
       startRun(runId, parentRunId, "llm_call", "chat.generate", {
         "gen_ai.request.model": model,
         "gen_ai.system": providerFrom(llm) ?? "",
         "evalkit.prompt": messagesToPrompt(messages),
+        ...(reqBody ? { "gen_ai.request.body": reqBody } : {}),
       });
     },
     handleLLMEnd(output: any, runId: string) {
@@ -162,11 +167,13 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
       try {
         if (rec) emitToolCalls(client, rec.span, fromLangChainResult(output));
       } catch { /* ignore */ }
+      const respBody = safeBody(output);
       endRun(runId, "OK", {
         "evalkit.completion": llmResultCompletion(output),
         "gen_ai.usage.input_tokens": tin,
         "gen_ai.usage.output_tokens": tout,
         "gen_ai.usage.total_tokens": tin + tout,
+        ...(respBody ? { "gen_ai.response.body": respBody } : {}),
       });
     },
     handleLLMError(err: any, runId: string) { endRun(runId, "ERROR", undefined, String(err?.message ?? err)); },

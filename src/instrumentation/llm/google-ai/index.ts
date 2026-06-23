@@ -1,6 +1,7 @@
 import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opentelemetry/api";
 import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
+import { safeBody } from "../_body.js";
 
 // Matches @google/generative-ai SDK (Gemini)
 // generativeModel.generateContent(request) or generateContent(string)
@@ -68,6 +69,9 @@ export function patchGoogleAI(
       ctx
     );
 
+    const reqBody = safeBody(req);
+    if (reqBody) span.setAttribute('gen_ai.request.body', reqBody);
+
     const spanCtx = trace.setSpan(ctx, span);
 
     let result: GenerateContentResult;
@@ -93,6 +97,9 @@ export function patchGoogleAI(
       'gen_ai.response.finish_reasons': firstCandidate?.finishReason ? [firstCandidate.finishReason] : [],
       'evalkit.completion': completionText,
     });
+
+    const respBody = safeBody(result);
+    if (respBody) span.setAttribute('gen_ai.response.body', respBody);
 
     span.setStatus({ code: SpanStatusCode.OK });
     span.end();

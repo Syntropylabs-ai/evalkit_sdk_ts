@@ -2,6 +2,7 @@ import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opente
 import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
 import { patchAnthropic } from "../anthropic/index.js";
+import { safeBody } from "../_body.js";
 
 // ─── Anthropic on Vertex AI ────────────────────────────────────────────────
 // AnthropicVertex from @anthropic-ai/sdk/vertex uses the same messages.create
@@ -69,6 +70,9 @@ export function patchVertexGenerativeModel(
       ctx
     );
 
+    const reqBody = safeBody(req);
+    if (reqBody) span.setAttribute('gen_ai.request.body', reqBody);
+
     const spanCtx = trace.setSpan(ctx, span);
 
     let result: VertexResponse;
@@ -94,6 +98,9 @@ export function patchVertexGenerativeModel(
       'gen_ai.response.finish_reasons': firstCandidate?.finishReason ? [firstCandidate.finishReason] : [],
       'evalkit.completion': completionText,
     });
+
+    const respBody = safeBody(result);
+    if (respBody) span.setAttribute('gen_ai.response.body', respBody);
 
     span.setStatus({ code: SpanStatusCode.OK });
     span.end();
