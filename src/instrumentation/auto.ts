@@ -18,17 +18,15 @@ import { patchMcp } from './mcp.js';
 import { patchConsole } from './runtime/console.js';
 import { patchErrors } from './runtime/errors.js';
 
-/** True if an OTel community instrumentation package is installed. When it is, our
- *  hand-rolled patch for the same library steps aside so the same call isn't traced
- *  twice — the OTel-native path wins. */
-function otelInstalled(pkg: string): boolean {
-  try { getRequire().resolve(pkg); return true; } catch { return false; }
+function otelWrapped(fn: any): boolean {
+  return !!(fn && (fn.__wrapped === true || fn.__original));
 }
 
 function tryPatchMongoose(client: EvalKitClient): void {
-  if (otelInstalled('@opentelemetry/instrumentation-mongoose')) return;
   const mongoose = loadIfAlreadyRequired('mongoose');
-  if (mongoose) patchMongoose(client, mongoose);
+  if (!mongoose) return;
+  if (otelWrapped(mongoose.Query?.prototype?.exec)) return;
+  patchMongoose(client, mongoose);
 }
 
 function tryPatchAxios(client: EvalKitClient): void {
@@ -39,50 +37,47 @@ function tryPatchAxios(client: EvalKitClient): void {
 async function tryPatchPgAsync(client: EvalKitClient): Promise<void> {
   // Patch pg.Client.prototype.query — covers node-postgres Client AND Pool
   // (Pool.query delegates to a Client), and ORMs on top (TypeORM, Sequelize, Knex).
-  if (otelInstalled('@opentelemetry/instrumentation-pg')) return;
   try {
     const _req = getRequire();
     const pg = _req('pg');
     const Client = pg.Client ?? pg.default?.Client;
-    if (Client) { patchPg(client, Client); return; }
+    if (Client) { if (!otelWrapped(Client.prototype?.query)) patchPg(client, Client); return; }
   } catch {}
   try {
     const pg = await dynImport('pg');
     const Client = pg.Client ?? pg.default?.Client;
-    if (Client) patchPg(client, Client);
+    if (Client && !otelWrapped(Client.prototype?.query)) patchPg(client, Client);
   } catch {}
 }
 
 async function tryPatchMysql2Async(client: EvalKitClient): Promise<void> {
   // Patch mysql2 Connection prototype — covers callback + promise APIs and pools.
-  if (otelInstalled('@opentelemetry/instrumentation-mysql2')) return;
   try {
     const _req = getRequire();
     const mysql = _req('mysql2');
     const Conn = mysql.Connection ?? mysql.default?.Connection ?? _req('mysql2/lib/connection');
-    if (Conn) { patchMysql2(client, Conn); return; }
+    if (Conn) { if (!otelWrapped(Conn.prototype?.query)) patchMysql2(client, Conn); return; }
   } catch {}
   try {
     const mysql = await dynImport('mysql2');
     const Conn = mysql.Connection ?? mysql.default?.Connection;
-    if (Conn) patchMysql2(client, Conn);
+    if (Conn && !otelWrapped(Conn.prototype?.query)) patchMysql2(client, Conn);
   } catch {}
 }
 
 async function tryPatchIoredisAsync(client: EvalKitClient): Promise<void> {
   // ioredis exports the Redis class (stable prototype.sendCommand). node-redis v4
   // builds commands dynamically per-instance → use the manual patchRedisClient there.
-  if (otelInstalled('@opentelemetry/instrumentation-ioredis')) return;
   try {
     const _req = getRequire();
     const mod = _req('ioredis');
     const Redis = mod.default ?? mod.Redis ?? mod;
-    if (Redis?.prototype) { patchRedis(client, Redis); return; }
+    if (Redis?.prototype) { if (!otelWrapped(Redis.prototype.sendCommand)) patchRedis(client, Redis); return; }
   } catch {}
   try {
     const mod = await dynImport('ioredis');
     const Redis = mod.default ?? mod.Redis ?? mod;
-    if (Redis?.prototype) patchRedis(client, Redis);
+    if (Redis?.prototype && !otelWrapped(Redis.prototype.sendCommand)) patchRedis(client, Redis);
   } catch {}
 }
 
@@ -261,10 +256,15 @@ const OTEL_INSTRUMENTATIONS: Array<[string, string]> = [
   ['@opentelemetry/instrumentation-redis-4', 'RedisInstrumentation'],
   ['@opentelemetry/instrumentation-pg', 'PgInstrumentation'],
   ['@opentelemetry/instrumentation-mysql2', 'MySQL2Instrumentation'],
-  ['@opentelemetry/instrumentation-undici', 'UndiciInstrumentation'],
   ['@opentelemetry/instrumentation-graphql', 'GraphQLInstrumentation'],
   ['@opentelemetry/instrumentation-nestjs-core', 'NestInstrumentation'],
 ];
+
+const OTEL_DISABLED_NATIVE = {
+  '@opentelemetry/instrumentation-fs': { enabled: false },
+  '@opentelemetry/instrumentation-undici': { enabled: false },
+  '@opentelemetry/instrumentation-http': { enabled: false },
+};
 
 async function tryRegisterOtelInstrumentations(): Promise<void> {
   try {
@@ -273,7 +273,7 @@ async function tryRegisterOtelInstrumentations(): Promise<void> {
     let instrumentations: unknown[] = [];
     try {
       const getAll = (await dynImport('@opentelemetry/auto-instrumentations-node'))?.getNodeAutoInstrumentations;
-      if (getAll) instrumentations = getAll({ '@opentelemetry/instrumentation-fs': { enabled: false } });
+      if (getAll) instrumentations = getAll(OTEL_DISABLED_NATIVE);
     } catch {}
     if (!instrumentations.length) {
       for (const [mod, cls] of OTEL_INSTRUMENTATIONS) {
@@ -309,7 +309,6 @@ export function setupAutoInstrumentation(client: EvalKitClient): void {
   tryPatchAxios(client);
   patchConsole(client);
   patchErrors(client);
-  tryPatchMongoose(client);
   Promise.all([
     tryPatchOpenAIAsync(client),
     tryPatchAnthropicAsync(client),
@@ -322,10 +321,15 @@ export function setupAutoInstrumentation(client: EvalKitClient): void {
     tryPatchGroqAsync(client),
     tryPatchLangChainAsync(client),
     tryPatchGoogleLiveAsync(client),
-    tryRegisterOtelInstrumentations(),
     tryPatchMcpAsync(client),
-    tryPatchPgAsync(client),
-    tryPatchMysql2Async(client),
-    tryPatchIoredisAsync(client),
   ]).catch(() => {});
+
+  tryRegisterOtelInstrumentations()
+    .then(() => Promise.all([
+      Promise.resolve(tryPatchMongoose(client)),
+      tryPatchPgAsync(client),
+      tryPatchMysql2Async(client),
+      tryPatchIoredisAsync(client),
+    ]))
+    .catch(() => {});
 }
