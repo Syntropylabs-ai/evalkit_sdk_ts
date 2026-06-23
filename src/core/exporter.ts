@@ -138,7 +138,9 @@ export class EvalKitExporter implements SpanExporter {
     const envelope: TraceEnvelope = {
       traceId: ctx.traceId,
       spanId: ctx.spanId,
-      parentSpanId: span.parentSpanId,
+      // OTel renamed this: newer sdk-trace-base exposes parentSpanContext.spanId,
+      // older exposes parentSpanId. Read whichever exists (cast — type varies by version).
+      parentSpanId: (span as any).parentSpanContext?.spanId ?? (span as any).parentSpanId,
       spanKind: spanKindName(span.kind),
       spanType: (attrs["evalkit.span_type"] as TraceEnvelope["spanType"]) ?? inferSpanType(span, attrs),
       status: otelStatusToString(span.status.code),
