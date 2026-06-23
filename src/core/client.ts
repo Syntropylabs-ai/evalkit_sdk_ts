@@ -8,13 +8,10 @@ import type { EvalKitOptions } from "./types.js";
 import { EvalKitExporter } from "./exporter.js";
 import { errorAttrs } from "./errors-util.js";
 
-const SDK_VERSION = "0.2.3";
+const SDK_VERSION = "0.2.4";
 
 const IO_MAX = 4096;
 
-/** Serialize a function arg / return value for a span attribute. Never throws.
- *  Returns undefined for `undefined` (so the caller omits the attribute instead of
- *  storing the literal string "undefined"). */
 function safeIO(value: unknown, limit: number = IO_MAX): string | undefined {
   if (value === undefined) return undefined;
   let s: string | undefined;
