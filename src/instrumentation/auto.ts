@@ -8,6 +8,7 @@ import { patchCohere } from './llm/cohere/index.js';
 import { patchGoogleAI } from './llm/google-ai/index.js';
 import { patchGoogleGenAI } from './llm/google-genai/index.js';
 import { patchGoogleLive } from './llm/google-live.js';
+import { patchOpenAIRealtime } from './llm/openai-realtime/index.js';
 import { patchMongoose } from './db/mongoose.js';
 import { patchPg } from './db/pg.js';
 import { patchMysql2 } from './db/mysql2.js';
@@ -247,6 +248,23 @@ async function tryPatchGoogleLiveAsync(client: EvalKitClient): Promise<void> {
   } catch {}
 }
 
+async function tryPatchOpenAIRealtimeAsync(client: EvalKitClient): Promise<void> {
+  // OpenAI Realtime (voice over WebSocket) — event-emitter based. Resolve the
+  // realtime WebSocket class from the optional `openai` peer and patch it.
+  // Best-effort: the subpath/export shape varies by openai version.
+  try {
+    const _req = getRequire();
+    const mod = _req('openai/beta/realtime/websocket');
+    const RT = mod.OpenAIRealtimeWebSocket ?? mod.default?.OpenAIRealtimeWebSocket ?? mod.default;
+    if (typeof RT === 'function') { patchOpenAIRealtime(client, RT); return; }
+  } catch {}
+  try {
+    const mod = await dynImport('openai/beta/realtime/websocket');
+    const RT = mod.OpenAIRealtimeWebSocket ?? mod.default?.OpenAIRealtimeWebSocket ?? mod.default;
+    if (typeof RT === 'function') patchOpenAIRealtime(client, RT);
+  } catch {}
+}
+
 
 const OTEL_INSTRUMENTATIONS: Array<[string, string]> = [
   ['@prisma/instrumentation', 'PrismaInstrumentation'],
@@ -321,6 +339,7 @@ export function setupAutoInstrumentation(client: EvalKitClient): void {
     tryPatchGroqAsync(client),
     tryPatchLangChainAsync(client),
     tryPatchGoogleLiveAsync(client),
+    tryPatchOpenAIRealtimeAsync(client),
     tryPatchMcpAsync(client),
   ]).catch(() => {});
 

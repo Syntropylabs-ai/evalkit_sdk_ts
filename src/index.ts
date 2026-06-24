@@ -26,6 +26,7 @@ import { autoTraceNest as _autoTraceNest } from "./frameworks/nestjs/autotrace.j
 import { patchMcp as _patchMcp } from "./instrumentation/mcp.js";
 import { instrumentPrisma as _instrumentPrisma } from "./instrumentation/db/prisma.js";
 import { traceLive as _traceLive } from "./instrumentation/llm/google-live.js";
+import { traceOpenAIRealtime as _traceOpenAIRealtime, patchOpenAIRealtime as _patchOpenAIRealtime } from "./instrumentation/llm/openai-realtime/index.js";
 import { setupAutoInstrumentation } from "./instrumentation/auto.js";
 import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitOptions } from "./core/types.js";
@@ -141,6 +142,19 @@ export function instrumentPrisma<T = any>(prisma: T, opts?: { system?: string })
 // Gemini Live (voice over WebSocket): drop-in for `ai.live.connect(params)`.
 export function traceLive(ai: any, params: any, opts?: { sessionId?: string; userId?: string }): Promise<any> {
   return _traceLive(getInstance(), ai, params, opts);
+}
+
+// OpenAI Realtime (voice over WebSocket): attach tracing to an already-created
+// realtime connection, e.g. `const rt = new OpenAIRealtimeWebSocket({ model });`
+// then `traceOpenAIRealtime(rt)`. Returns the same connection.
+export function traceOpenAIRealtime(rt: any, opts?: { model?: string; sessionId?: string; userId?: string }): any {
+  return _traceOpenAIRealtime(getInstance(), rt, opts);
+}
+
+// Auto-patch the OpenAI realtime WebSocket class so new connections are traced.
+// Pass the class, e.g. `require("openai/beta/realtime/websocket").OpenAIRealtimeWebSocket`.
+export function patchOpenAIRealtimeClass(RealtimeClass: any): void {
+  _patchOpenAIRealtime(getInstance(), RealtimeClass);
 }
 
 // ---------------------------------------------------------------------------
@@ -401,6 +415,8 @@ export default {
   patchMCPClient,
   instrumentPrisma,
   traceLive,
+  traceOpenAIRealtime,
+  patchOpenAIRealtimeClass,
   // Framework integrations
   expressMiddleware,
   fastifyPlugin,
