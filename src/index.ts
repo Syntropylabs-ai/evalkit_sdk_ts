@@ -30,6 +30,9 @@ import { patchQdrantClient as _patchQdrantClient } from "./instrumentation/vecto
 import { patchChromaCollection as _patchChromaCollection } from "./instrumentation/vectordb/chroma.js";
 import { patchWeaviateModule as _patchWeaviateModule, patchWeaviateClientInstance as _patchWeaviateClientInstance } from "./instrumentation/vectordb/weaviate.js";
 import { patchLlamaIndex as _patchLlamaIndex } from "./instrumentation/llm/llamaindex.js";
+import { patchOpenAIAudio as _patchOpenAIAudio } from "./instrumentation/llm/openai-audio.js";
+import { patchElevenLabsClientInstance as _patchElevenLabsClientInstance } from "./instrumentation/llm/elevenlabs.js";
+import { patchAssemblyAI as _patchAssemblyAI } from "./instrumentation/llm/assemblyai.js";
 import { instrumentPrisma as _instrumentPrisma } from "./instrumentation/db/prisma.js";
 import { traceLive as _traceLive } from "./instrumentation/llm/google-live.js";
 import { traceOpenAIRealtime as _traceOpenAIRealtime, patchOpenAIRealtime as _patchOpenAIRealtime } from "./instrumentation/llm/openai-realtime/index.js";
@@ -169,6 +172,23 @@ export function patchWeaviateClientInstance<T = any>(weaviateClient: T): T {
 
 export function patchLlamaIndexClient(llamaindexModule: any): void {
   _patchLlamaIndex(getInstance(), llamaindexModule);
+}
+
+// Pass the OpenAI class itself, e.g. `require("openai").default ?? require("openai").OpenAI`.
+export function patchOpenAIAudioClient(OpenAIClass: any): void {
+  _patchOpenAIAudio(getInstance(), OpenAIClass);
+}
+
+// ElevenLabs' TextToSpeechClient isn't exported — call this on any client you
+// already constructed; it patches the shared prototype, covering every client
+// instance the process constructs afterward, not just the one passed in.
+export function patchElevenLabsClientInstance<T = any>(elevenLabsClient: T): T {
+  return _patchElevenLabsClientInstance(getInstance(), elevenLabsClient);
+}
+
+// Pass assemblyai's TranscriptService class, e.g. `require("assemblyai").TranscriptService`.
+export function patchAssemblyAIClient(TranscriptService: any): void {
+  _patchAssemblyAI(getInstance(), TranscriptService);
 }
 
 // Prisma: returns an instrumented client (db_query spans). Use the returned value.
@@ -457,6 +477,9 @@ export default {
   patchWeaviateClient,
   patchWeaviateClientInstance,
   patchLlamaIndexClient,
+  patchOpenAIAudioClient,
+  patchElevenLabsClientInstance,
+  patchAssemblyAIClient,
   instrumentPrisma,
   traceLive,
   traceOpenAIRealtime,

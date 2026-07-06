@@ -24,6 +24,9 @@ import { patchQdrantClient } from './vectordb/qdrant.js';
 import { patchChromaCollection } from './vectordb/chroma.js';
 import { patchWeaviateModule } from './vectordb/weaviate.js';
 import { patchLlamaIndex } from './llm/llamaindex.js';
+import { patchOpenAIAudio } from './llm/openai-audio.js';
+import { patchElevenLabsClientInstance } from './llm/elevenlabs.js';
+import { patchAssemblyAI } from './llm/assemblyai.js';
 
 function otelWrapped(fn: any): boolean {
   return !!(fn && (fn.__wrapped === true || fn.__original));
@@ -401,6 +404,37 @@ async function tryPatchLlamaIndexAsync(client: EvalKitClient): Promise<void> {
   } catch {}
 }
 
+async function tryPatchOpenAIAudioAsync(client: EvalKitClient): Promise<void> {
+  try {
+    const _req = getRequire();
+    const openaiMod = _req('openai');
+    const OpenAI = openaiMod.default ?? openaiMod.OpenAI ?? openaiMod;
+    if (OpenAI?.Audio) { patchOpenAIAudio(client, OpenAI); return; }
+  } catch {}
+  try {
+    const openaiMod = await dynImport('openai');
+    const OpenAI = openaiMod.default ?? openaiMod.OpenAI ?? openaiMod;
+    if (OpenAI?.Audio) patchOpenAIAudio(client, OpenAI);
+  } catch {}
+}
+
+async function tryPatchAssemblyAIAsync(client: EvalKitClient): Promise<void> {
+  try {
+    const _req = getRequire();
+    const mod = _req('assemblyai');
+    if (mod?.TranscriptService) { patchAssemblyAI(client, mod.TranscriptService); return; }
+  } catch {}
+  try {
+    const mod = await dynImport('assemblyai');
+    if (mod?.TranscriptService) patchAssemblyAI(client, mod.TranscriptService);
+  } catch {}
+}
+
+// ElevenLabs has no module-level auto-patch path — TextToSpeechClient isn't
+// exported and only reachable through an already-constructed ElevenLabsClient
+// instance, which auto-instrumentation has no way to obtain here. Call
+// patchElevenLabsClientInstance(client) manually on your own client instead.
+
 export function setupAutoInstrumentation(client: EvalKitClient): void {
   try { patchIncomingHttp(client); } catch {}
   try { patchHttp(client); } catch {}
@@ -428,6 +462,8 @@ export function setupAutoInstrumentation(client: EvalKitClient): void {
     tryPatchChromaAsync(client),
     tryPatchWeaviateAsync(client),
     tryPatchLlamaIndexAsync(client),
+    tryPatchOpenAIAudioAsync(client),
+    tryPatchAssemblyAIAsync(client),
   ]).catch(() => {});
 
   tryRegisterOtelInstrumentations()

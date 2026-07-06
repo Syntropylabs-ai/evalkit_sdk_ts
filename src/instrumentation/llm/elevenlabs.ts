@@ -1,0 +1,51 @@
+import { SpanKind, SpanStatusCode, context as otelContext } from "@opentelemetry/api";
+import type { EvalKitClient } from "../../core/client.js";
+import { safeBody } from "./_body.js";
+
+
+
+function patchConvert(client: EvalKitClient, proto: any): void {
+  if (typeof proto?.convert !== "function" || proto.convert.__evalkit) return;
+  const original = proto.convert;
+
+  async function traced(this: any, voiceId: string, body: any = {}, ...rest: any[]) {
+    const model = String(body?.modelId ?? "unknown");
+    const text = String(body?.text ?? "");
+    const reqBody = safeBody({ ...body, text: undefined });
+    const attrs: Record<string, any> = { "evalkit.span_type": "llm_call", "gen_ai.system": "elevenlabs" };
+    if (text) attrs["evalkit.prompt"] = text;
+    if (reqBody) attrs["gen_ai.request.body"] = reqBody;
+    const span = client.tracer.startSpan("audio.speech", { kind: SpanKind.CLIENT, attributes: attrs }, otelContext.active());
+
+    try {
+      const result = await original.call(this, voiceId, body, ...rest);
+      span.setAttributes({
+        "evalkit.completion": "[audio generated]",
+        "gen_ai.audio.input_characters": text.length,
+        "gen_ai.request.voice": voiceId,
+      });
+      span.setStatus({ code: SpanStatusCode.OK });
+      span.end();
+      return result;
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      span.recordException(error);
+      span.setAttributes({ "gen_ai.audio.input_characters": text.length, "gen_ai.request.voice": voiceId });
+      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+      span.end();
+      throw err;
+    }
+  }
+  traced.__evalkit = true;
+  proto.convert = traced;
+}
+
+/** Call on any ElevenLabsClient instance you already have — patches the shared
+ *  TextToSpeechClient.prototype, covering every client instance afterward. */
+export function patchElevenLabsClientInstance(client: EvalKitClient, elevenLabsClient: any): any {
+  try {
+    const proto = Object.getPrototypeOf(elevenLabsClient?.textToSpeech);
+    if (proto) patchConvert(client, proto);
+  } catch { /* never throw into the caller */ }
+  return elevenLabsClient;
+}

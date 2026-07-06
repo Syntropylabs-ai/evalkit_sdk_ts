@@ -39,12 +39,23 @@ function extractTurnsText(turns: unknown): string {
   return parts.join('\n');
 }
 
+function modalityTokens(details: any, modality: string): number {
+  let total = 0;
+  try {
+    for (const m of details ?? []) {
+      if (m?.modality === modality) total += m?.tokenCount ?? 0;
+    }
+  } catch { /* ignore */ }
+  return total;
+}
+
 class TurnState {
   inputParts: string[] = [];
   outputParts: string[] = [];
   thinkingParts: string[] = [];
   requestDump: any[] = [];
   responseDump: any[] = [];
+  usage: any = null;
   turnStart = Date.now();
 
   reset(): void {
@@ -53,6 +64,7 @@ class TurnState {
     this.thinkingParts = [];
     this.requestDump = [];
     this.responseDump = [];
+    this.usage = null;
     this.turnStart = Date.now();
   }
 }
@@ -101,12 +113,18 @@ function wireSession(
     const completion = turn.outputParts.join('').trim();
     const thinking = turn.thinkingParts.join('').trim();
     const ms = Date.now() - turn.turnStart;
-    const { requestDump, responseDump } = turn;
+    const { requestDump, responseDump, usage } = turn;
     turn.reset();
     if (!prompt && !completion) return; // skip audio-only turns with no transcript
 
     const reqBody = requestDump.length ? safeJson(requestDump) : undefined;
     const respBody = responseDump.length ? safeJson(responseDump) : undefined;
+
+    const tokensIn = usage?.promptTokenCount ?? 0;
+    const tokensOut = usage?.responseTokenCount ?? 0;
+    const reasoningTokens = usage?.thoughtsTokenCount ?? 0;
+    const audioTokensIn = modalityTokens(usage?.promptTokensDetails, 'AUDIO');
+    const audioTokensOut = modalityTokens(usage?.responseTokensDetails, 'AUDIO');
 
     const { end } = client.startSpan('voice.turn', {
       ...base,
@@ -116,6 +134,10 @@ function wireSession(
       ...(thinking && { 'gen_ai.response.thinking': thinking.slice(0, MAX_TEXT) }),
       ...(reqBody && { 'gen_ai.request.body': reqBody }),
       ...(respBody && { 'gen_ai.response.body': respBody }),
+      ...(usage && { 'gen_ai.usage.input_tokens': tokensIn, 'gen_ai.usage.output_tokens': tokensOut }),
+      ...(reasoningTokens && { 'gen_ai.usage.reasoning_tokens': reasoningTokens }),
+      ...(audioTokensIn && { 'gen_ai.usage.audio_input_tokens': audioTokensIn }),
+      ...(audioTokensOut && { 'gen_ai.usage.audio_output_tokens': audioTokensOut }),
       'llm.turn_ms': ms,
     }, session.ctx);
     end('OK');
@@ -141,6 +163,7 @@ function wireSession(
 
       if (msg?.usageMetadata) {
         const um = msg.usageMetadata;
+        turn.usage = um;
         turn.responseDump.push({
           usage: {
             promptTokenCount: um.promptTokenCount,

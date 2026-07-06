@@ -94,6 +94,8 @@ function wireSession(
       const tokensIn = usage?.input_tokens ?? 0;
       const tokensOut = usage?.output_tokens ?? 0;
       const totalTokens = usage?.total_tokens ?? (tokensIn + tokensOut);
+      const audioTokensIn = usage?.input_token_details?.audio_tokens ?? 0;
+      const audioTokensOut = usage?.output_token_details?.audio_tokens ?? 0;
       const responseBody = safeJson(response);
 
       const { end } = client.startSpan('voice.turn', {
@@ -104,6 +106,8 @@ function wireSession(
         'gen_ai.usage.input_tokens': tokensIn,
         'gen_ai.usage.output_tokens': tokensOut,
         'gen_ai.usage.total_tokens': totalTokens,
+        ...(audioTokensIn && { 'gen_ai.usage.audio_input_tokens': audioTokensIn }),
+        ...(audioTokensOut && { 'gen_ai.usage.audio_output_tokens': audioTokensOut }),
         ...(responseBody && { 'gen_ai.response.body': responseBody }),
         'llm.turn_ms': ms,
       }, session.ctx);
