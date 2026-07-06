@@ -18,6 +18,12 @@ import { patchHttp, patchFetch, patchIncomingHttp } from './http/node-http.js';
 import { patchMcp } from './mcp.js';
 import { patchConsole } from './runtime/console.js';
 import { patchErrors } from './runtime/errors.js';
+import { patchOllama } from './llm/ollama.js';
+import { patchPineconeIndex } from './vectordb/pinecone.js';
+import { patchQdrantClient } from './vectordb/qdrant.js';
+import { patchChromaCollection } from './vectordb/chroma.js';
+import { patchWeaviateModule } from './vectordb/weaviate.js';
+import { patchLlamaIndex } from './llm/llamaindex.js';
 
 function otelWrapped(fn: any): boolean {
   return !!(fn && (fn.__wrapped === true || fn.__original));
@@ -320,6 +326,81 @@ async function tryPatchMcpAsync(client: EvalKitClient): Promise<void> {
   } catch {}
 }
 
+async function tryPatchOllamaAsync(client: EvalKitClient): Promise<void> {
+  try {
+    const _req = getRequire();
+    const mod = _req('ollama');
+    const OllamaClass = mod.Ollama ?? mod.default?.Ollama;
+    if (OllamaClass?.prototype) { patchOllama(client, OllamaClass); return; }
+  } catch {}
+  try {
+    const mod = await dynImport('ollama');
+    const OllamaClass = mod.Ollama ?? mod.default?.Ollama;
+    if (OllamaClass?.prototype) patchOllama(client, OllamaClass);
+  } catch {}
+}
+
+async function tryPatchPineconeAsync(client: EvalKitClient): Promise<void> {
+  try {
+    const _req = getRequire();
+    const mod = _req('@pinecone-database/pinecone');
+    const Index = mod.Index ?? mod.default?.Index;
+    if (Index?.prototype) { patchPineconeIndex(client, Index); return; }
+  } catch {}
+  try {
+    const mod = await dynImport('@pinecone-database/pinecone');
+    const Index = mod.Index ?? mod.default?.Index;
+    if (Index?.prototype) patchPineconeIndex(client, Index);
+  } catch {}
+}
+
+async function tryPatchQdrantAsync(client: EvalKitClient): Promise<void> {
+  try {
+    const _req = getRequire();
+    const mod = _req('@qdrant/js-client-rest');
+    const QdrantClient = mod.QdrantClient ?? mod.default?.QdrantClient;
+    if (QdrantClient?.prototype) { patchQdrantClient(client, QdrantClient); return; }
+  } catch {}
+  try {
+    const mod = await dynImport('@qdrant/js-client-rest');
+    const QdrantClient = mod.QdrantClient ?? mod.default?.QdrantClient;
+    if (QdrantClient?.prototype) patchQdrantClient(client, QdrantClient);
+  } catch {}
+}
+
+async function tryPatchChromaAsync(client: EvalKitClient): Promise<void> {
+  try {
+    const _req = getRequire();
+    const mod = _req('chromadb');
+    if (mod?.CollectionHandle?.prototype) { patchChromaCollection(client, mod); return; }
+  } catch {}
+  try {
+    const mod = await dynImport('chromadb');
+    if (mod?.CollectionHandle?.prototype) patchChromaCollection(client, mod);
+  } catch {}
+}
+
+async function tryPatchWeaviateAsync(client: EvalKitClient): Promise<void> {
+  // weaviate-client only exposes its top-level index (see vectordb/weaviate.ts) —
+  // patch the connect*() factory functions themselves, not a class.
+  try {
+    const _req = getRequire();
+    const mod = _req('weaviate-client');
+    if (typeof mod?.connectToLocal === 'function') { patchWeaviateModule(client, mod); return; }
+  } catch {}
+  try {
+    const mod = await dynImport('weaviate-client');
+    if (typeof mod?.connectToLocal === 'function') patchWeaviateModule(client, mod);
+  } catch {}
+}
+
+async function tryPatchLlamaIndexAsync(client: EvalKitClient): Promise<void> {
+  try {
+    const mod = await dynImport('llamaindex');
+    patchLlamaIndex(client, mod);
+  } catch {}
+}
+
 export function setupAutoInstrumentation(client: EvalKitClient): void {
   try { patchIncomingHttp(client); } catch {}
   try { patchHttp(client); } catch {}
@@ -341,6 +422,12 @@ export function setupAutoInstrumentation(client: EvalKitClient): void {
     tryPatchGoogleLiveAsync(client),
     tryPatchOpenAIRealtimeAsync(client),
     tryPatchMcpAsync(client),
+    tryPatchOllamaAsync(client),
+    tryPatchPineconeAsync(client),
+    tryPatchQdrantAsync(client),
+    tryPatchChromaAsync(client),
+    tryPatchWeaviateAsync(client),
+    tryPatchLlamaIndexAsync(client),
   ]).catch(() => {});
 
   tryRegisterOtelInstrumentations()

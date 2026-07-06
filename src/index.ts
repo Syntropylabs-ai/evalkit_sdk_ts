@@ -24,6 +24,12 @@ import { createHapiPlugin } from "./frameworks/hapi/plugin.js";
 import { EvalKitInterceptor } from "./frameworks/nestjs/interceptor.js";
 import { autoTraceNest as _autoTraceNest } from "./frameworks/nestjs/autotrace.js";
 import { patchMcp as _patchMcp } from "./instrumentation/mcp.js";
+import { patchOllama as _patchOllama } from "./instrumentation/llm/ollama.js";
+import { patchPineconeIndex as _patchPineconeIndex } from "./instrumentation/vectordb/pinecone.js";
+import { patchQdrantClient as _patchQdrantClient } from "./instrumentation/vectordb/qdrant.js";
+import { patchChromaCollection as _patchChromaCollection } from "./instrumentation/vectordb/chroma.js";
+import { patchWeaviateModule as _patchWeaviateModule, patchWeaviateClientInstance as _patchWeaviateClientInstance } from "./instrumentation/vectordb/weaviate.js";
+import { patchLlamaIndex as _patchLlamaIndex } from "./instrumentation/llm/llamaindex.js";
 import { instrumentPrisma as _instrumentPrisma } from "./instrumentation/db/prisma.js";
 import { traceLive as _traceLive } from "./instrumentation/llm/google-live.js";
 import { traceOpenAIRealtime as _traceOpenAIRealtime, patchOpenAIRealtime as _patchOpenAIRealtime } from "./instrumentation/llm/openai-realtime/index.js";
@@ -132,6 +138,37 @@ export function patchMysql2Client(mysqlInstance: any): void {
 
 export function patchMCPClient(mcpClientClassOrInstance: any): void {
   _patchMcp(getInstance(), mcpClientClassOrInstance);
+}
+
+export function patchOllamaClient(OllamaClass: any): void {
+  _patchOllama(getInstance(), OllamaClass);
+}
+
+export function patchPineconeClient(IndexClass: any): void {
+  _patchPineconeIndex(getInstance(), IndexClass);
+}
+
+export function patchQdrantClient(QdrantClientClass: any): void {
+  _patchQdrantClient(getInstance(), QdrantClientClass);
+}
+
+export function patchChromaClient(chromadbModule: any): void {
+  _patchChromaCollection(getInstance(), chromadbModule);
+}
+
+export function patchWeaviateClient(weaviateClientModule: any): void {
+  _patchWeaviateModule(getInstance(), weaviateClientModule);
+}
+
+// Fallback for real ESM `import`/`await import()` consumers, where the module
+// namespace object is read-only and patchWeaviateClient() can't rebind its
+// exports: call this on a client you already connected yourself.
+export function patchWeaviateClientInstance<T = any>(weaviateClient: T): T {
+  return _patchWeaviateClientInstance(getInstance(), weaviateClient);
+}
+
+export function patchLlamaIndexClient(llamaindexModule: any): void {
+  _patchLlamaIndex(getInstance(), llamaindexModule);
 }
 
 // Prisma: returns an instrumented client (db_query spans). Use the returned value.
@@ -413,6 +450,13 @@ export default {
   patchPgClient,
   patchMysql2Client,
   patchMCPClient,
+  patchOllamaClient,
+  patchPineconeClient,
+  patchQdrantClient,
+  patchChromaClient,
+  patchWeaviateClient,
+  patchWeaviateClientInstance,
+  patchLlamaIndexClient,
   instrumentPrisma,
   traceLive,
   traceOpenAIRealtime,

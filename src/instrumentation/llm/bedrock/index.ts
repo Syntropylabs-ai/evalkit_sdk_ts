@@ -10,11 +10,29 @@ type ConverseInput = {
   system?: Array<{ text: string }>;
   inferenceConfig?: { maxTokens?: number; temperature?: number; topP?: number };
 };
+type ConverseContentBlock = {
+  text?: string;
+  reasoningContent?: { reasoningText?: { text?: string }; redactedContent?: unknown };
+};
 type ConverseOutput = {
-  output?: { message?: { content?: Array<{ text?: string }> } };
+  output?: { message?: { content?: ConverseContentBlock[] } };
   stopReason?: string;
   usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
 };
+
+/**
+ * Pulls Converse API reasoningContent blocks out of the output message.
+ * Anthropic (and other reasoning-capable) models on Bedrock surface their
+ * chain-of-thought this way; redacted variants carry only an opaque encrypted
+ * payload, so we just flag their presence.
+ */
+function extractReasoning(content: ConverseContentBlock[]): { thinkingText: string; hasRedactedThinking: boolean } {
+  const thinkingText = content
+    .map((c) => c.reasoningContent?.reasoningText?.text ?? "")
+    .join("");
+  const hasRedactedThinking = content.some((c) => c.reasoningContent?.redactedContent != null);
+  return { thinkingText, hasRedactedThinking };
+}
 type BedrockClient = {
   send: (...args: unknown[]) => Promise<unknown>;
   config?: { region?: string | (() => Promise<string>) };
@@ -90,9 +108,9 @@ export function patchBedrock(
       throw err;
     }
 
-    const completionText = result.output?.message?.content
-      ?.map((c) => c.text ?? '')
-      .join('') ?? '';
+    const outputContent = result.output?.message?.content ?? [];
+    const completionText = outputContent.map((c) => c.text ?? '').join('');
+    const { thinkingText, hasRedactedThinking } = extractReasoning(outputContent);
 
     span.setAttributes({
       'gen_ai.response.model': modelId,
@@ -101,6 +119,8 @@ export function patchBedrock(
       'gen_ai.usage.total_tokens': result.usage?.totalTokens ?? 0,
       'gen_ai.response.finish_reasons': result.stopReason ? [result.stopReason] : [],
       'evalkit.completion': completionText,
+      ...(thinkingText && { 'gen_ai.response.thinking': thinkingText }),
+      ...(hasRedactedThinking && { 'gen_ai.response.has_redacted_thinking': true }),
     });
 
     const respBody = safeBody(result);

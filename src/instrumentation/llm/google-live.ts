@@ -1,25 +1,236 @@
 import type { EvalKitClient } from '../../core/client.js';
 
 // Gemini Live runs over a WebSocket, which nothing auto-instruments. We wrap the
-// connect params: open a `voice.session` trace, emit one `voice.turn` span per
-// model turn (text + latency), and close the session when the socket closes.
+// connect params (for inbound messages) and the returned Session (for outbound
+// sendClientContent/sendRealtimeInput/sendToolResponse calls): open a
+// `voice.session` trace, emit one `voice.turn` span per model turn with
+// prompt/completion/tokens/request+response body — the same shape every other
+// auto-instrumented provider produces — and a `tool_call` span per function
+// call. Closes the session when the socket closes.
 // Shared by both the auto patch (patchGoogleLive) and the explicit helper (traceLive).
+
+const MAX_TEXT = 8192;
+
+function safeJson(value: unknown, limit = 16384): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  try {
+    const s = JSON.stringify(value);
+    return s.length > limit ? s.slice(0, limit) + '…' : s;
+  } catch {
+    return undefined;
+  }
+}
+
+// Pull readable text out of a `turns` (ContentListUnion) argument to
+// sendClientContent — a string, a Content, or an array of either.
+function extractTurnsText(turns: unknown): string {
+  const parts: string[] = [];
+  const fromContent = (c: any) => {
+    if (typeof c === 'string') { parts.push(c); return; }
+    const role = c?.role ? `${c.role}: ` : '';
+    const text = (c?.parts ?? [])
+      .filter((p: any) => typeof p?.text === 'string' && !p?.thought)
+      .map((p: any) => p.text)
+      .join('');
+    if (text) parts.push(`${role}${text}`);
+  };
+  if (Array.isArray(turns)) turns.forEach(fromContent);
+  else if (turns != null) fromContent(turns);
+  return parts.join('\n');
+}
+
+class TurnState {
+  inputParts: string[] = [];
+  outputParts: string[] = [];
+  thinkingParts: string[] = [];
+  requestDump: any[] = [];
+  responseDump: any[] = [];
+  turnStart = Date.now();
+
+  reset(): void {
+    this.inputParts = [];
+    this.outputParts = [];
+    this.thinkingParts = [];
+    this.requestDump = [];
+    this.responseDump = [];
+    this.turnStart = Date.now();
+  }
+}
+
+function wireSession(
+  client: EvalKitClient,
+  base: Record<string, string>,
+  opts: { sessionId?: string; userId?: string } = {},
+): {
+  ctx: any;
+  end: (status?: 'OK' | 'ERROR') => void;
+  onMessage: (msg: any) => void;
+  onSendClientContent: (params: any) => void;
+  onSendRealtimeInput: (params: any) => void;
+  onSendToolResponse: (params: any) => void;
+} {
+  const attrs: Record<string, string> = {
+    ...base,
+    ...(opts.sessionId ? { 'evalkit.session_id': opts.sessionId } : {}),
+    ...(opts.userId ? { 'evalkit.user_id': opts.userId } : {}),
+  };
+  const session = client.startTrace('voice.session', attrs);
+  const turn = new TurnState();
+
+  const emitToolCalls = (msg: any): void => {
+    try {
+      const fns = msg?.toolCall?.functionCalls;
+      if (!Array.isArray(fns)) return;
+      for (const fc of fns) {
+        if (!fc?.name) continue;
+        const argsStr = JSON.stringify(fc.args ?? {}).slice(0, MAX_TEXT);
+        const { end } = client.startSpan(String(fc.name), {
+          ...base,
+          'evalkit.span_type': 'tool_call',
+          'gen_ai.tool.name': String(fc.name),
+          'gen_ai.tool.call.arguments': argsStr,
+          'tool.name': String(fc.name),
+        }, session.ctx);
+        end('OK');
+      }
+    } catch { /* never break the stream */ }
+  };
+
+  const endTurn = (): void => {
+    const prompt = turn.inputParts.join('\n').trim();
+    const completion = turn.outputParts.join('').trim();
+    const thinking = turn.thinkingParts.join('').trim();
+    const ms = Date.now() - turn.turnStart;
+    const { requestDump, responseDump } = turn;
+    turn.reset();
+    if (!prompt && !completion) return; // skip audio-only turns with no transcript
+
+    const reqBody = requestDump.length ? safeJson(requestDump) : undefined;
+    const respBody = responseDump.length ? safeJson(responseDump) : undefined;
+
+    const { end } = client.startSpan('voice.turn', {
+      ...base,
+      'evalkit.span_type': 'llm_call',
+      ...(prompt && { 'evalkit.prompt': prompt.slice(0, MAX_TEXT) }),
+      ...(completion && { 'evalkit.completion': completion.slice(0, MAX_TEXT) }),
+      ...(thinking && { 'gen_ai.response.thinking': thinking.slice(0, MAX_TEXT) }),
+      ...(reqBody && { 'gen_ai.request.body': reqBody }),
+      ...(respBody && { 'gen_ai.response.body': respBody }),
+      'llm.turn_ms': ms,
+    }, session.ctx);
+    end('OK');
+  };
+
+  const onMessage = (msg: any): void => {
+    try {
+      const sc = msg?.serverContent;
+      if (sc) {
+        const itext = sc.inputTranscription?.text;
+        if (typeof itext === 'string' && itext) turn.inputParts.push(itext);
+
+        const parts = sc.modelTurn?.parts ?? [];
+        for (const p of parts) {
+          if (typeof p?.text !== 'string') continue;
+          if (p.thought) turn.thinkingParts.push(p.text);
+          else turn.outputParts.push(p.text);
+        }
+
+        const otext = sc.outputTranscription?.text;
+        if (typeof otext === 'string' && otext) turn.outputParts.push(otext);
+      }
+
+      if (msg?.usageMetadata) {
+        const um = msg.usageMetadata;
+        turn.responseDump.push({
+          usage: {
+            promptTokenCount: um.promptTokenCount,
+            responseTokenCount: um.responseTokenCount,
+            totalTokenCount: um.totalTokenCount,
+            thoughtsTokenCount: um.thoughtsTokenCount,
+          },
+        });
+      }
+      if (msg?.toolCall) turn.responseDump.push({ toolCall: msg.toolCall });
+      if (sc?.turnComplete) turn.responseDump.push({ turnComplete: true });
+      if (sc?.interrupted) turn.responseDump.push({ interrupted: true });
+
+      emitToolCalls(msg);
+      if (sc?.turnComplete) endTurn();
+    } catch { /* never break the audio stream */ }
+  };
+
+  const onSendClientContent = (params: any): void => {
+    try {
+      const text = extractTurnsText(params?.turns);
+      if (text) turn.inputParts.push(text);
+      turn.requestDump.push({ type: 'client_content', turnComplete: params?.turnComplete, turns: params?.turns });
+    } catch { /* never break the stream */ }
+  };
+
+  const onSendRealtimeInput = (params: any): void => {
+    try {
+      if (typeof params?.text === 'string' && params.text) {
+        turn.inputParts.push(params.text);
+        turn.requestDump.push({ type: 'realtime_input', text: params.text });
+      } else if (params) {
+        const modality = ['audio', 'video', 'activityStart', 'activityEnd'].find((k) => params[k] !== undefined);
+        if (modality) turn.requestDump.push({ type: 'realtime_input', modality });
+      }
+    } catch { /* never break the stream */ }
+  };
+
+  const onSendToolResponse = (params: any): void => {
+    try {
+      turn.requestDump.push({ type: 'tool_response', functionResponses: params?.functionResponses });
+    } catch { /* never break the stream */ }
+  };
+
+  return { ctx: session.ctx, end: session.end, onMessage, onSendClientContent, onSendRealtimeInput, onSendToolResponse };
+}
+
+// Instruments the Session object `connect()` resolves to: wraps the three send
+// methods to capture outbound content, and `close` to end the session span.
+function instrumentSession(session: any, wiring: ReturnType<typeof wireSession>, closed: () => void): any {
+  if (!session || typeof session !== 'object') return session;
+  try {
+    const origSendClientContent = typeof session.sendClientContent === 'function' ? session.sendClientContent.bind(session) : null;
+    if (origSendClientContent) {
+      session.sendClientContent = (params: any) => {
+        wiring.onSendClientContent(params);
+        return origSendClientContent(params);
+      };
+    }
+    const origSendRealtimeInput = typeof session.sendRealtimeInput === 'function' ? session.sendRealtimeInput.bind(session) : null;
+    if (origSendRealtimeInput) {
+      session.sendRealtimeInput = (params: any) => {
+        wiring.onSendRealtimeInput(params);
+        return origSendRealtimeInput(params);
+      };
+    }
+    const origSendToolResponse = typeof session.sendToolResponse === 'function' ? session.sendToolResponse.bind(session) : null;
+    if (origSendToolResponse) {
+      session.sendToolResponse = (params: any) => {
+        wiring.onSendToolResponse(params);
+        return origSendToolResponse(params);
+      };
+    }
+    const origClose = typeof session.close === 'function' ? session.close.bind(session) : null;
+    if (origClose) session.close = (...a: any[]) => { closed(); return origClose(...a); };
+  } catch { /* never break the host */ }
+  return session;
+}
+
 function wrapConnectParams(
   client: EvalKitClient,
   params: any,
   opts: { sessionId?: string; userId?: string } = {},
-): { params: any; closed: () => void } {
+): { params: any; attach: (session: any) => any } {
   const model = String(params?.model ?? 'gemini-live');
   const base: Record<string, string> = {
     'gen_ai.system': 'google',
     'gen_ai.request.model': model,
-    ...(opts.sessionId ? { 'evalkit.session_id': opts.sessionId } : {}),
-    ...(opts.userId ? { 'evalkit.user_id': opts.userId } : {}),
   };
-  const session = client.startTrace('voice.session', base);
-
-  let buf = '';
-  let turnStart = Date.now();
+  const wiring = wireSession(client, base, opts);
   const userOnMessage = params?.callbacks?.onmessage;
 
   const wrapped = {
@@ -27,57 +238,16 @@ function wrapConnectParams(
     callbacks: {
       ...(params?.callbacks ?? {}),
       onmessage: (msg: any) => {
-        try {
-          // Audio responses carry text via outputTranscription, not modelTurn.parts.
-          const parts = msg?.serverContent?.modelTurn?.parts ?? [];
-          for (const p of parts) if (typeof p?.text === 'string') buf += p.text;
-          const otext = msg?.serverContent?.outputTranscription?.text;
-          if (typeof otext === 'string') buf += otext;
-
-          // Live tool/function calls arrive on msg.toolCall.
-          const fns = msg?.toolCall?.functionCalls;
-          if (Array.isArray(fns)) {
-            for (const fc of fns) {
-              if (!fc?.name) continue;
-              const { end } = client.startSpan(String(fc.name), {
-                ...base,
-                'evalkit.span_type': 'tool_call',
-                'gen_ai.tool.name': String(fc.name),
-                'gen_ai.tool.call.arguments': JSON.stringify(fc.args ?? {}).slice(0, 8192),
-                'tool.name': String(fc.name),
-              }, session.ctx);
-              end('OK');
-            }
-          }
-
-          if (msg?.serverContent?.turnComplete) {
-            const text = buf.trim();
-            const ms = Date.now() - turnStart;
-            buf = '';
-            turnStart = Date.now();
-            if (text) {  // skip empty turns (audio-only with no transcript)
-              const { end } = client.startSpan('voice.turn', {
-                ...base,
-                'evalkit.span_type': 'llm_call',
-                'evalkit.completion': text.slice(0, 8192),
-                'llm.turn_ms': ms,
-              }, session.ctx);
-              end('OK');
-            }
-          }
-        } catch { /* never break the audio stream */ }
+        wiring.onMessage(msg);
         return userOnMessage?.(msg);
       },
     },
   };
 
-  return { params: wrapped, closed: () => { try { session.end('OK'); } catch { /* ignore */ } } };
-}
+  let ended = false;
+  const closed = () => { if (ended) return; ended = true; try { wiring.end('OK'); } catch { /* ignore */ } };
 
-function attachClose(live: any, closed: () => void): any {
-  const origClose = typeof live?.close === 'function' ? live.close.bind(live) : null;
-  if (origClose) live.close = (...a: any[]) => { closed(); return origClose(...a); };
-  return live;
+  return { params: wrapped, attach: (session: any) => instrumentSession(session, wiring, closed) };
 }
 
 // Explicit drop-in for `ai.live.connect(params)`.
@@ -87,8 +257,8 @@ export async function traceLive(
   params: any,
   opts: { sessionId?: string; userId?: string } = {},
 ): Promise<any> {
-  const { params: wrapped, closed } = wrapConnectParams(client, params, opts);
-  return attachClose(await ai.live.connect(wrapped), closed);
+  const { params: wrapped, attach } = wrapConnectParams(client, params, opts);
+  return attach(await ai.live.connect(wrapped));
 }
 
 // Auto path: patch Live.prototype.connect so plain `ai.live.connect(...)` is traced.
@@ -98,8 +268,8 @@ export function patchGoogleLive(client: EvalKitClient, LiveClass: any): void {
   if ((proto.connect as { __evalkit?: boolean }).__evalkit) return;
   const original = proto.connect;
   proto.connect = async function (this: unknown, params: any, ...rest: any[]): Promise<unknown> {
-    const { params: wrapped, closed } = wrapConnectParams(client, params ?? {});
-    return attachClose(await original.call(this, wrapped, ...rest), closed);
+    const { params: wrapped, attach } = wrapConnectParams(client, params ?? {});
+    return attach(await original.call(this, wrapped, ...rest));
   };
   (proto.connect as { __evalkit?: boolean }).__evalkit = true;
 }

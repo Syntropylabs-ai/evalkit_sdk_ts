@@ -17,7 +17,12 @@ type ChatCompletion = {
     message: { content: string | null; tool_calls?: ToolCall[] };
     finish_reason?: string;
   }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
 };
 type CreateParams = {
   model?: string;
@@ -37,10 +42,12 @@ type Completions = { create: (...args: unknown[]) => Promise<unknown> };
  * - Symbol.asyncIterator is overridden to accumulate chunks and end the span
  *   when the stream is exhausted.
  */
-function wrapOpenAIStream(stream: any, span: Span): any {
+function wrapOpenAIStream(stream: any, span: Span, startMs: number = Date.now()): any {
   let content = '';
   let tokensIn = 0;
   let tokensOut = 0;
+  let reasoningTokens = 0;
+  let ttftMs: number | undefined;
   let finished = false;
 
   function finish(error?: Error) {
@@ -55,6 +62,8 @@ function wrapOpenAIStream(stream: any, span: Span): any {
         'gen_ai.usage.input_tokens': tokensIn,
         'gen_ai.usage.output_tokens': tokensOut,
         'gen_ai.streaming': true,
+        ...(reasoningTokens && { 'gen_ai.usage.reasoning_tokens': reasoningTokens }),
+        ...(ttftMs !== undefined && { 'gen_ai.server.time_to_first_token_ms': ttftMs }),
       });
       const body = safeBody({ text: content });
       if (body) span.setAttribute('gen_ai.response.body', body);
@@ -75,10 +84,14 @@ function wrapOpenAIStream(stream: any, span: Span): any {
                 if (!result.done && result.value) {
                   const chunk = result.value;
                   const delta = chunk.choices?.[0]?.delta?.content;
-                  if (delta) content += delta;
+                  if (delta) {
+                    if (ttftMs === undefined) ttftMs = Date.now() - startMs;
+                    content += delta;
+                  }
                   if (chunk.usage) {
                     tokensIn = chunk.usage.prompt_tokens ?? 0;
                     tokensOut = chunk.usage.completion_tokens ?? 0;
+                    reasoningTokens = chunk.usage.completion_tokens_details?.reasoning_tokens ?? 0;
                   }
                 }
                 if (result.done) finish();
@@ -144,6 +157,7 @@ export function patchOpenAI(
 
     // Streaming path — wrap the stream to accumulate content and end span on exhaustion
     if (params?.stream) {
+      const streamStartMs = Date.now();
       let stream: unknown;
       try {
         stream = await otelContext.with(spanCtx, () => original.apply(this, args));
@@ -154,7 +168,7 @@ export function patchOpenAI(
         span.end();
         throw err;
       }
-      return wrapOpenAIStream(stream, span);
+      return wrapOpenAIStream(stream, span, streamStartMs);
     }
 
     let result: ChatCompletion;
@@ -170,6 +184,7 @@ export function patchOpenAI(
 
     const choice = result.choices?.[0];
     const completion = choice?.message.content ?? "";
+    const reasoningTokens = result.usage?.completion_tokens_details?.reasoning_tokens ?? 0;
 
     span.setAttributes({
       "gen_ai.response.model": result.model,
@@ -179,6 +194,7 @@ export function patchOpenAI(
       "gen_ai.usage.total_tokens": result.usage?.total_tokens ?? 0,
       "gen_ai.response.finish_reasons": choice?.finish_reason ? [choice.finish_reason] : [],
       "evalkit.completion": completion,
+      ...(reasoningTokens && { "gen_ai.usage.reasoning_tokens": reasoningTokens }),
     });
 
     const respBody = safeBody(result);

@@ -5,7 +5,7 @@ import { emitToolCalls, fromAnthropicBlocks } from "../_toolcalls.js";
 import { safeBody } from "../_body.js";
 
 type AnthropicMessages = Array<{ role: string; content: string }>;
-type ContentBlock = { type: string; text?: string; id?: string; name?: string; input?: unknown };
+type ContentBlock = { type: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown };
 type Message = {
   id: string;
   model: string;
@@ -26,6 +26,20 @@ type CreateParams = {
 type Messages = { create: (...args: unknown[]) => Promise<unknown> };
 
 /**
+ * Pulls extended-thinking text out of an Anthropic response's content blocks.
+ * Redacted blocks carry only an opaque encrypted payload (no readable text),
+ * so we just flag their presence.
+ */
+function extractThinking(content: ContentBlock[]): { thinkingText: string; hasRedactedThinking: boolean } {
+  const thinkingText = content
+    .filter((b) => b.type === "thinking")
+    .map((b) => b.thinking ?? "")
+    .join("");
+  const hasRedactedThinking = content.some((b) => b.type === "redacted_thinking");
+  return { thinkingText, hasRedactedThinking };
+}
+
+/**
  * Wraps an Anthropic streaming response (AsyncIterable) in a Proxy.
  * Accumulates content/token counts and ends the span when the stream is exhausted.
  *
@@ -35,17 +49,28 @@ type Messages = { create: (...args: unknown[]) => Promise<unknown> };
  *   message_delta        → usage.output_tokens
  *   message_stop         → stream done
  */
-function wrapAnthropicStream(stream: any, span: Span): any {
+function wrapAnthropicStream(stream: any, span: Span, startMs: number = Date.now()): any {
   let content = '';
+  let thinking = '';
+  let hasRedactedThinking = false;
   let tokensIn = 0;
   let tokensOut = 0;
+  let ttftMs: number | undefined;
   let finished = false;
 
   function processEvent(event: any) {
     const type = event?.type;
     if (type === 'content_block_delta') {
       const delta = event.delta;
-      if (delta?.type === 'text_delta' && delta.text) content += delta.text;
+      if (delta?.type === 'text_delta' && delta.text) {
+        if (ttftMs === undefined) ttftMs = Date.now() - startMs;
+        content += delta.text;
+      } else if (delta?.type === 'thinking_delta' && delta.thinking) {
+        if (ttftMs === undefined) ttftMs = Date.now() - startMs;
+        thinking += delta.thinking;
+      }
+    } else if (type === 'content_block_start') {
+      if (event.content_block?.type === 'redacted_thinking') hasRedactedThinking = true;
     } else if (type === 'message_start') {
       tokensIn = event.message?.usage?.input_tokens ?? 0;
     } else if (type === 'message_delta') {
@@ -65,6 +90,9 @@ function wrapAnthropicStream(stream: any, span: Span): any {
         'gen_ai.usage.input_tokens': tokensIn,
         'gen_ai.usage.output_tokens': tokensOut,
         'gen_ai.streaming': true,
+        ...(thinking && { 'gen_ai.response.thinking': thinking }),
+        ...(hasRedactedThinking && { 'gen_ai.response.has_redacted_thinking': true }),
+        ...(ttftMs !== undefined && { 'gen_ai.server.time_to_first_token_ms': ttftMs }),
       });
       const body = safeBody({ text: content });
       if (body) span.setAttribute('gen_ai.response.body', body);
@@ -146,6 +174,7 @@ export function patchAnthropic(
 
     // Streaming path — wrap the stream to accumulate content and end span on exhaustion
     if (params?.stream) {
+      const streamStartMs = Date.now();
       let stream: unknown;
       try {
         stream = await otelContext.with(spanCtx, () => original.apply(this, args));
@@ -156,7 +185,7 @@ export function patchAnthropic(
         span.end();
         throw err;
       }
-      return wrapAnthropicStream(stream, span);
+      return wrapAnthropicStream(stream, span, streamStartMs);
     }
 
     let result: Message;
@@ -174,6 +203,7 @@ export function patchAnthropic(
       .filter((b) => b.type === "text")
       .map((b) => b.text ?? "")
       .join("");
+    const { thinkingText, hasRedactedThinking } = extractThinking(result.content);
 
     span.setAttributes({
       "gen_ai.response.model": result.model,
@@ -182,6 +212,8 @@ export function patchAnthropic(
       "gen_ai.usage.output_tokens": result.usage?.output_tokens ?? 0,
       "gen_ai.response.finish_reasons": result.stop_reason ? [result.stop_reason] : [],
       "evalkit.completion": textContent,
+      ...(thinkingText && { "gen_ai.response.thinking": thinkingText }),
+      ...(hasRedactedThinking && { "gen_ai.response.has_redacted_thinking": true }),
     });
 
     const respBody = safeBody(result);

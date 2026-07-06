@@ -1,6 +1,6 @@
 {
   "name": "syntropylabs-evalkit",
-  "version": "0.2.6",
+  "version": "0.2.8",
   "description": "EvalKit TypeScript SDK — OpenTelemetry-based LLM observability and tracing",
   "license": "LicenseRef-Proprietary",
   "author": "Syntropy Labs",
@@ -73,7 +73,13 @@
     "pg": "*",
     "mysql2": "*",
     "mongoose": "*",
-    "ioredis": "*"
+    "ioredis": "*",
+    "ollama": "*",
+    "@pinecone-database/pinecone": "*",
+    "@qdrant/js-client-rest": "*",
+    "chromadb": "*",
+    "weaviate-client": "*",
+    "llamaindex": "*"
   },
   "peerDependenciesMeta": {
     "openai": {
@@ -113,6 +119,24 @@
       "optional": true
     },
     "ioredis": {
+      "optional": true
+    },
+    "ollama": {
+      "optional": true
+    },
+    "@pinecone-database/pinecone": {
+      "optional": true
+    },
+    "@qdrant/js-client-rest": {
+      "optional": true
+    },
+    "chromadb": {
+      "optional": true
+    },
+    "weaviate-client": {
+      "optional": true
+    },
+    "llamaindex": {
       "optional": true
     }
   },
