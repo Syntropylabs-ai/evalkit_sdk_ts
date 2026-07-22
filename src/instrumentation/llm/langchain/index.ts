@@ -4,7 +4,20 @@ import type { EvalKitClient } from "../../../core/client.js";
 import { recordSimToolCall } from "../../../core/simulation.js";
 import { emitToolCalls, fromLangChainResult } from "../_toolcalls.js";
 import { safeBody } from "../_body.js";
-import { dynImport } from "../../../utils/dynimport.js";
+import { dynImport, getRequire } from "../../../utils/dynimport.js";
+
+// @langchain/core ships both a CJS and an ESM build, so a synchronous
+// require() resolves it immediately — tried first so the global patch below
+// is installed before init() returns, not sometime later on a microtask.
+// Falls back to a dynamic import for ESM-only setups where require()
+// isn't available at all.
+function loadLangChainModule(specifier: string): any {
+  try {
+    return getRequire()(specifier);
+  } catch {
+    return undefined;
+  }
+}
 
 // LangChain / LangGraph instrumentation for the TS SDK.
 //
@@ -13,11 +26,28 @@ import { dynImport } from "../../../utils/dynimport.js";
 // span tree from LangChain's own runId / parentRunId graph and nest it under any
 // active evalkit (OTel) trace.
 //
-// `patchLangChain` best-effort registers the handler GLOBALLY by wrapping
-// CallbackManager.configure, so `init()` covers LangGraph with no user code.
-// JS lacks a stable global-handler hook, so `langchainCallbackHandler()` is also
-// exported for the explicit `{ callbacks: [handler] }` path. Both never throw and
-// are no-ops when LangChain isn't installed.
+// `patchLangChain` best-effort registers the handler GLOBALLY by patching
+// CallbackManager._configureSync, so `init()` covers LangGraph with no user
+// code. Two things were tried and ruled out first, both verified live against
+// a real @langchain/core@1.2.3 LangGraph agent run:
+//   - Wrapping the public `CallbackManager.configure`: never called — a real
+//     agent run calls the private `_configureSync` directly, dozens of times,
+//     and `configure` itself is just a thin (and in this version, unused)
+//     wrapper around it.
+//   - @langchain/core/context's own `registerConfigureHook` +
+//     `setContextVariable` (its documented public mechanism for exactly this):
+//     backed by AsyncLocalStorage, so the value only survives within the same
+//     async call chain it was set in — it's for "temporarily attach a handler
+//     for the duration of this run", not "register once at init() for the
+//     life of the process". Crossing even one `await` (which init()'s own
+//     dynamic import unavoidably does before user code ever runs) drops it
+//     silently, so zero spans were ever emitted through it in practice.
+// `_configureSync` is private/underscore-prefixed, but it's a plain
+// synchronous class-method mutation — unaffected by async-context scoping,
+// and the same technique OpenLIT and OpenLLMetry/Traceloop use for this exact
+// package. `langchainCallbackHandler()` is also exported for the explicit
+// `{ callbacks: [handler] }` path. Both never throw and are no-ops when
+// LangChain isn't installed.
 
 const ATTR_MAX = 4096;
 
@@ -205,7 +235,7 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
  */
 export async function langchainCallbackHandler(client: EvalKitClient): Promise<any | null> {
   try {
-    const base: any = await dynImport("@langchain/core/callbacks/base");
+    const base: any = loadLangChainModule("@langchain/core/callbacks/base") ?? await dynImport("@langchain/core/callbacks/base");
     const handler = base.BaseCallbackHandler.fromMethods(langchainHandlerMethods(client));
     (handler as any).name = "evalkit";
     (handler as any).__evalkit = true;
@@ -220,20 +250,25 @@ export async function patchLangChain(client: EvalKitClient): Promise<any | null>
   const handler = await langchainCallbackHandler(client);
   if (!handler) return null;
   try {
-    const mgrMod: any = await dynImport("@langchain/core/callbacks/manager");
+    const mgrMod: any = loadLangChainModule("@langchain/core/callbacks/manager") ?? await dynImport("@langchain/core/callbacks/manager");
     const CM = mgrMod.CallbackManager;
-    if (CM && typeof CM.configure === "function" && !(CM as any).__evalkitPatched) {
-      const orig = CM.configure.bind(CM);
-      CM.configure = (...args: any[]) => {
-        const mgr = orig(...args);
+    if (CM && typeof CM._configureSync === "function" && !(CM as any).__evalkitPatched) {
+      const original = CM._configureSync.bind(CM);
+
+      CM._configureSync = function (this: any, inheritableHandlers: any, ...rest: any[]) {
         try {
-          if (mgr) {
-            const all = [...(mgr.handlers ?? []), ...(mgr.inheritableHandlers ?? [])];
-            const has = all.some((h: any) => h?.__evalkit);
-            if (!has && typeof mgr.addHandler === "function") mgr.addHandler(handler, true);
+          if (Array.isArray(inheritableHandlers) || !inheritableHandlers) {
+            const handlers = inheritableHandlers ? [...inheritableHandlers] : [];
+            if (!handlers.includes(handler)) handlers.unshift(handler);
+            return original.call(this, handlers, ...rest);
           }
-        } catch { /* never break LangChain */ }
-        return mgr;
+          if (typeof inheritableHandlers.addHandler === "function") {
+            if (!inheritableHandlers.handlers?.includes(handler)) {
+              inheritableHandlers.addHandler(handler, true);
+            }
+          }
+        } catch { /* never break LangChain — fall through to the original call */ }
+        return original.call(this, inheritableHandlers, ...rest);
       };
       (CM as any).__evalkitPatched = true;
     }

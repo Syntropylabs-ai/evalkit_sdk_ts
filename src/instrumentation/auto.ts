@@ -16,6 +16,8 @@ import { patchRedis } from './db/redis.js';
 import { patchAxios } from './http/axios.js';
 import { patchHttp, patchFetch, patchIncomingHttp } from './http/node-http.js';
 import { patchMcp } from './mcp.js';
+import { patchGoogleAdk } from './google-adk.js';
+import { patchLangChain } from './llm/langchain/index.js';
 import { patchConsole } from './runtime/console.js';
 import { patchErrors } from './runtime/errors.js';
 import { patchOllama } from './llm/ollama.js';
@@ -237,7 +239,6 @@ async function tryPatchGroqAsync(client: EvalKitClient): Promise<void> {
 
 async function tryPatchLangChainAsync(client: EvalKitClient): Promise<void> {
   try {
-    const { patchLangChain } = await import('./llm/langchain/index.js');
     await patchLangChain(client);
   } catch {}
 }
@@ -311,6 +312,21 @@ async function tryRegisterOtelInstrumentations(): Promise<void> {
       }
     }
     if (instrumentations.length) reg({ instrumentations });
+  } catch {}
+}
+
+async function tryPatchGoogleAdkAsync(client: EvalKitClient): Promise<void> {
+  // @google/adk — Runner's exported binding is getter-only (bundler re-export
+  // helper), so we require() the module and let patchGoogleAdk mutate
+  // Runner.prototype directly rather than reassigning the export.
+  try {
+    const _req = getRequire();
+    const mod = _req('@google/adk');
+    if (mod?.Runner) { patchGoogleAdk(client, mod); return; }
+  } catch {}
+  try {
+    const mod = await dynImport('@google/adk');
+    if (mod?.Runner) patchGoogleAdk(client, mod);
   } catch {}
 }
 
@@ -456,6 +472,7 @@ export function setupAutoInstrumentation(client: EvalKitClient): void {
     tryPatchGoogleLiveAsync(client),
     tryPatchOpenAIRealtimeAsync(client),
     tryPatchMcpAsync(client),
+    tryPatchGoogleAdkAsync(client),
     tryPatchOllamaAsync(client),
     tryPatchPineconeAsync(client),
     tryPatchQdrantAsync(client),
