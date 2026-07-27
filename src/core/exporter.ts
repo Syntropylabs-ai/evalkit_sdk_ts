@@ -35,10 +35,32 @@ export class EvalKitExporter implements SpanExporter {
       return;
     }
 
+    // Google ADK — both google-adk (Python) and @google/adk (JS, adk-js's
+    // core/src/telemetry/tracing.ts) — creates its OWN OpenTelemetry tracer via
+    // trace.getTracer('gcp.vertex.agent', ...). The instant EvalKitClient's
+    // constructor registers this NodeTracerProvider as the global provider
+    // (provider.register(), above in client.ts), every span ADK creates
+    // (invoke_agent, execute_tool, the merged-tool-calls span, call_llm, ...)
+    // gets swept up here too, duplicating what EvalKit's own hand-rolled
+    // google-adk.ts instrumentation already captures cleanly (run_agent /
+    // tool_call spans with real function.args/function.result /
+    // gen_ai.tool.call.arguments/result) — and rendering as near-empty spans
+    // in the dashboard since this generic bridge doesn't know ADK's attribute
+    // shapes. Not every ADK span carries the same attributes (e.g. the merged
+    // tool-call span sets tool_call_args to the literal string "N/A"), so the
+    // reliable signal is the producing tracer's instrumentation scope name —
+    // set once, uniformly, for every span that tracer creates — rather than
+    // any individual attribute key. EvalKit's hand-rolled spans are
+    // authoritative for ADK coverage.
+    const nonAdkSpans = spans.filter((s) => {
+      const scope = (s as any).instrumentationScope?.name ?? (s as any).instrumentationLibrary?.name;
+      return scope !== "gcp.vertex.agent";
+    });
+
     // Bound every span to the backend's message-size limit. Oversized spans are
     // trimmed (heavy bodies → prompt/completion → attrs) and, only if still too
     // big, dropped entirely — so a huge span can never break or stall ingest.
-    const events = spans
+    const events = nonAdkSpans
       .map((s) => fitEnvelope(this.toEnvelope(s), this.debug))
       .filter((e): e is TraceEnvelope => e !== null);
 
