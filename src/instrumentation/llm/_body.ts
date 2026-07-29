@@ -2,7 +2,7 @@
 // Never throws; capped to keep the span small (the exporter's fitEvent drops
 // "gen_ai.request.body"/"gen_ai.response.body" first anyway). Returns undefined
 // on total failure so callers can omit the attribute.
-export function safeBody(obj: unknown, limit = 16384): string | undefined {
+export function safeBody(obj: unknown, limit = 2 * 1024 * 1024): string | undefined {
   if (obj == null) return undefined;
   let s: string;
   try {

@@ -26,7 +26,7 @@ function extractDelta(ev: any): string {
   return '';
 }
 
-function safeJson(value: unknown, limit = 16384): string | undefined {
+function safeJson(value: unknown, limit = 2 * 1024 * 1024): string | undefined {
   if (value === undefined || value === null) return undefined;
   try {
     const s = JSON.stringify(value);

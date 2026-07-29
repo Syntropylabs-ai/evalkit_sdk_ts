@@ -19,7 +19,7 @@ type Candidate = {
 type GenerateContentResult = {
   response?: {
     candidates?: Candidate[];
-    usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number };
+    usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number; cachedContentTokenCount?: number };
   };
 };
 type GoogleGenerativeModel = {
@@ -97,6 +97,8 @@ export function patchGoogleAI(
       'gen_ai.response.finish_reasons': firstCandidate?.finishReason ? [firstCandidate.finishReason] : [],
       'evalkit.completion': completionText,
     });
+    const cachedTokens = resp?.usageMetadata?.cachedContentTokenCount ?? 0;
+    if (cachedTokens) span.setAttribute('gen_ai.usage.cached_tokens', cachedTokens);
 
     const respBody = safeBody(result);
     if (respBody) span.setAttribute('gen_ai.response.body', respBody);

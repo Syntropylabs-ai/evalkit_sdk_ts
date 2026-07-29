@@ -27,7 +27,7 @@ type VertexCandidate = { content?: { parts?: Array<{ text?: string }> }; finishR
 type VertexResponse = {
   response?: {
     candidates?: VertexCandidate[];
-    usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number };
+    usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number; cachedContentTokenCount?: number };
   };
 };
 type GenerativeModel = {
@@ -98,6 +98,10 @@ export function patchVertexGenerativeModel(
       'gen_ai.response.finish_reasons': firstCandidate?.finishReason ? [firstCandidate.finishReason] : [],
       'evalkit.completion': completionText,
     });
+    // Subset of input_tokens Gemini served from its (cheaper) context cache —
+    // already included above, never additive.
+    const cachedTokens = resp?.usageMetadata?.cachedContentTokenCount ?? 0;
+    if (cachedTokens) span.setAttribute('gen_ai.usage.cached_tokens', cachedTokens);
 
     const respBody = safeBody(result);
     if (respBody) span.setAttribute('gen_ai.response.body', respBody);

@@ -11,7 +11,7 @@ import type { EvalKitClient } from '../../core/client.js';
 
 const MAX_TEXT = 8192;
 
-function safeJson(value: unknown, limit = 16384): string | undefined {
+function safeJson(value: unknown, limit = 2 * 1024 * 1024): string | undefined {
   if (value === undefined || value === null) return undefined;
   try {
     const s = JSON.stringify(value);
@@ -123,6 +123,7 @@ function wireSession(
     const tokensIn = usage?.promptTokenCount ?? 0;
     const tokensOut = usage?.responseTokenCount ?? 0;
     const reasoningTokens = usage?.thoughtsTokenCount ?? 0;
+    const cachedTokens = usage?.cachedContentTokenCount ?? 0;
     const audioTokensIn = modalityTokens(usage?.promptTokensDetails, 'AUDIO');
     const audioTokensOut = modalityTokens(usage?.responseTokensDetails, 'AUDIO');
 
@@ -136,6 +137,7 @@ function wireSession(
       ...(respBody && { 'gen_ai.response.body': respBody }),
       ...(usage && { 'gen_ai.usage.input_tokens': tokensIn, 'gen_ai.usage.output_tokens': tokensOut }),
       ...(reasoningTokens && { 'gen_ai.usage.reasoning_tokens': reasoningTokens }),
+      ...(cachedTokens && { 'gen_ai.usage.cached_tokens': cachedTokens }),
       ...(audioTokensIn && { 'gen_ai.usage.audio_input_tokens': audioTokensIn }),
       ...(audioTokensOut && { 'gen_ai.usage.audio_output_tokens': audioTokensOut }),
       'llm.turn_ms': ms,
@@ -170,6 +172,7 @@ function wireSession(
             responseTokenCount: um.responseTokenCount,
             totalTokenCount: um.totalTokenCount,
             thoughtsTokenCount: um.thoughtsTokenCount,
+            cachedContentTokenCount: um.cachedContentTokenCount,
           },
         });
       }

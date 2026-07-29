@@ -9,12 +9,14 @@ import { simByTraceId } from "./simulation.js";
 // hammering the ingest endpoint on every flush just spams logs and CPU.
 const AUTH_FAIL_LIMIT = 3;
 
-// Hard ceiling on a single span's serialized size. Kept under Kafka's default
-// 1 MiB message limit so an oversized span (e.g. a captured base64 image body)
-// is trimmed — and dropped if still too big — instead of being sent and
-// rejected with "Message Size Too Large". Tracing must never ship a payload
-// the backend can't accept.
-const MAX_SPAN_BYTES = 900 * 1024;
+// Hard ceiling on a single span's serialized size. Kept under the Kafka
+// broker's message.max.bytes (raised to 10 MiB alongside this — see
+// trace-service's KAFKA_MAX_MESSAGE_BYTES and the broker's docker-compose
+// config, which must stay >= this value). An oversized span (e.g. a captured
+// base64 image body) is trimmed — and dropped if still too big — instead of
+// being sent and rejected with "Message Size Too Large". Tracing must never
+// ship a payload the backend can't accept.
+const MAX_SPAN_BYTES = 8 * 1024 * 1024;
 
 export class EvalKitExporter implements SpanExporter {
   private readonly url: string;

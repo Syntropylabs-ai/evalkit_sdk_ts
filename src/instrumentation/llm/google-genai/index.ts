@@ -23,7 +23,7 @@ type GenAIResponse = {
   text?: string;
   candidates?: Candidate[];
   functionCalls?: Array<{ name?: string; args?: Record<string, unknown>; id?: string }>;
-  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number };
+  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number; cachedContentTokenCount?: number };
 };
 type ModelsProto = {
   generateContent?: (...args: unknown[]) => Promise<unknown>;
@@ -133,6 +133,12 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
         "gen_ai.usage.total_tokens": result?.usageMetadata?.totalTokenCount ?? 0,
         "evalkit.completion": completionFrom(result),
       });
+      // Subset of input_tokens Gemini served from its (cheaper) context cache —
+      // already included above, never additive. Surfaced separately so
+      // downstream cost math isn't forced to price a long, mostly-cached
+      // prompt at the full fresh-input-token rate.
+      const cachedTokens = result?.usageMetadata?.cachedContentTokenCount ?? 0;
+      if (cachedTokens) span.setAttribute("gen_ai.usage.cached_tokens", cachedTokens);
       const respBody = safeBody(result);
       if (respBody) span.setAttribute("gen_ai.response.body", respBody);
       try { recordToolCalls(result, span, span.spanContext().traceId); } catch { /* never break */ }
@@ -181,6 +187,7 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
         const parts: string[] = [];
         let tin = 0;
         let tout = 0;
+        let tcached = 0;
         try {
           for await (const chunk of stream) {
             try {
@@ -189,6 +196,7 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
               if (chunk?.usageMetadata) {
                 tin = chunk.usageMetadata.promptTokenCount ?? tin;
                 tout = chunk.usageMetadata.candidatesTokenCount ?? tout;
+                tcached = chunk.usageMetadata.cachedContentTokenCount ?? tcached;
               }
               recordToolCalls(chunk, span, span.spanContext().traceId);
             } catch { /* never break the stream */ }
@@ -200,6 +208,7 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
             "gen_ai.usage.output_tokens": tout,
             "evalkit.completion": parts.join(""),
           });
+          if (tcached) span.setAttribute("gen_ai.usage.cached_tokens", tcached);
           const respBody = safeBody({ text: parts.join("") });
           if (respBody) span.setAttribute("gen_ai.response.body", respBody);
           span.setStatus({ code: SpanStatusCode.OK });
