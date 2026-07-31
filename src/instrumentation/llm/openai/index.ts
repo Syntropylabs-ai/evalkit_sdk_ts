@@ -22,6 +22,7 @@ type ChatCompletion = {
     completion_tokens?: number;
     total_tokens?: number;
     completion_tokens_details?: { reasoning_tokens?: number };
+    prompt_tokens_details?: { cached_tokens?: number };
   };
 };
 type CreateParams = {
@@ -47,6 +48,7 @@ function wrapOpenAIStream(stream: any, span: Span, startMs: number = Date.now())
   let tokensIn = 0;
   let tokensOut = 0;
   let reasoningTokens = 0;
+  let cacheReadTokens = 0;
   let ttftMs: number | undefined;
   let finished = false;
 
@@ -63,6 +65,7 @@ function wrapOpenAIStream(stream: any, span: Span, startMs: number = Date.now())
         'gen_ai.usage.output_tokens': tokensOut,
         'gen_ai.streaming': true,
         ...(reasoningTokens && { 'gen_ai.usage.reasoning_tokens': reasoningTokens }),
+        ...(cacheReadTokens > 0 && { 'gen_ai.usage.cache_read_tokens': cacheReadTokens }),
         ...(ttftMs !== undefined && { 'gen_ai.server.time_to_first_token_ms': ttftMs }),
       });
       const body = safeBody({ text: content });
@@ -92,6 +95,7 @@ function wrapOpenAIStream(stream: any, span: Span, startMs: number = Date.now())
                     tokensIn = chunk.usage.prompt_tokens ?? 0;
                     tokensOut = chunk.usage.completion_tokens ?? 0;
                     reasoningTokens = chunk.usage.completion_tokens_details?.reasoning_tokens ?? 0;
+                    cacheReadTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
                   }
                 }
                 if (result.done) finish();
@@ -185,6 +189,7 @@ export function patchOpenAI(
     const choice = result.choices?.[0];
     const completion = choice?.message.content ?? "";
     const reasoningTokens = result.usage?.completion_tokens_details?.reasoning_tokens ?? 0;
+    const cacheReadTokens = result.usage?.prompt_tokens_details?.cached_tokens ?? 0;
 
     span.setAttributes({
       "gen_ai.response.model": result.model,
@@ -195,6 +200,7 @@ export function patchOpenAI(
       "gen_ai.response.finish_reasons": choice?.finish_reason ? [choice.finish_reason] : [],
       "evalkit.completion": completion,
       ...(reasoningTokens && { "gen_ai.usage.reasoning_tokens": reasoningTokens }),
+      ...(cacheReadTokens && { "gen_ai.usage.cache_read_tokens": cacheReadTokens }),
     });
 
     const respBody = safeBody(result);

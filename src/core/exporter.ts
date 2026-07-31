@@ -178,6 +178,12 @@ export class EvalKitExporter implements SpanExporter {
       completion: attrs["evalkit.completion"] as string | undefined,
       tokensIn: foreignLlm ? undefined : (Math.round((attrs["gen_ai.usage.input_tokens"] as number) || 0) || undefined),
       tokensOut: foreignLlm ? undefined : (Math.round((attrs["gen_ai.usage.output_tokens"] as number) || 0) || undefined),
+      // Gemini/Vertex instrumentation only has one cache concept and stashes
+      // it under `gen_ai.usage.cached_tokens` (no separate read/write like
+      // Anthropic) — fall back to that when the Anthropic/OpenAI-style key
+      // isn't present.
+      cacheReadTokens: foreignLlm ? undefined : (Math.round(((attrs["gen_ai.usage.cache_read_tokens"] ?? attrs["gen_ai.usage.cached_tokens"]) as number) || 0) || undefined),
+      cacheCreationTokens: foreignLlm ? undefined : (Math.round((attrs["gen_ai.usage.cache_creation_tokens"] as number) || 0) || undefined),
       latencyMs: Math.round(endMs - startMs),
       startTime: new Date(startMs).toISOString(),
       endTime: new Date(endMs).toISOString(),

@@ -30,6 +30,13 @@ export interface TraceEnvelope {
   // Token accounting
   tokensIn?: number;
   tokensOut?: number;
+  // Tokens served from / written to the provider's prompt cache (Anthropic
+  // cache_read_input_tokens/cache_creation_input_tokens, OpenAI
+  // prompt_tokens_details.cached_tokens, Gemini cached_content_token_count).
+  // Already counted within tokensIn — additive breakdowns for cost math,
+  // not extra tokens on top of tokensIn.
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
 
   // Timing
   latencyMs?: number;

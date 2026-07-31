@@ -11,7 +11,7 @@ type Message = {
   model: string;
   content: ContentBlock[];
   stop_reason?: string;
-  usage?: { input_tokens?: number; output_tokens?: number };
+  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
 };
 type CreateParams = {
   model?: string;
@@ -55,6 +55,8 @@ function wrapAnthropicStream(stream: any, span: Span, startMs: number = Date.now
   let hasRedactedThinking = false;
   let tokensIn = 0;
   let tokensOut = 0;
+  let cacheReadTokens = 0;
+  let cacheCreationTokens = 0;
   let ttftMs: number | undefined;
   let finished = false;
 
@@ -72,7 +74,12 @@ function wrapAnthropicStream(stream: any, span: Span, startMs: number = Date.now
     } else if (type === 'content_block_start') {
       if (event.content_block?.type === 'redacted_thinking') hasRedactedThinking = true;
     } else if (type === 'message_start') {
-      tokensIn = event.message?.usage?.input_tokens ?? 0;
+      cacheReadTokens = event.message?.usage?.cache_read_input_tokens ?? 0;
+      cacheCreationTokens = event.message?.usage?.cache_creation_input_tokens ?? 0;
+      // Anthropic's input_tokens excludes cache reads/writes (additive, unlike
+      // OpenAI/Gemini) — normalize to inclusive-of-cache like every other
+      // provider's tokensIn.
+      tokensIn = (event.message?.usage?.input_tokens ?? 0) + cacheReadTokens + cacheCreationTokens;
     } else if (type === 'message_delta') {
       tokensOut = event.usage?.output_tokens ?? 0;
     }
@@ -89,6 +96,8 @@ function wrapAnthropicStream(stream: any, span: Span, startMs: number = Date.now
         'evalkit.completion': content,
         'gen_ai.usage.input_tokens': tokensIn,
         'gen_ai.usage.output_tokens': tokensOut,
+        ...(cacheReadTokens > 0 && { 'gen_ai.usage.cache_read_tokens': cacheReadTokens }),
+        ...(cacheCreationTokens > 0 && { 'gen_ai.usage.cache_creation_tokens': cacheCreationTokens }),
         'gen_ai.streaming': true,
         ...(thinking && { 'gen_ai.response.thinking': thinking }),
         ...(hasRedactedThinking && { 'gen_ai.response.has_redacted_thinking': true }),
@@ -204,12 +213,20 @@ export function patchAnthropic(
       .map((b) => b.text ?? "")
       .join("");
     const { thinkingText, hasRedactedThinking } = extractThinking(result.content);
+    const cacheReadTokens = result.usage?.cache_read_input_tokens ?? 0;
+    const cacheCreationTokens = result.usage?.cache_creation_input_tokens ?? 0;
+    // Anthropic's input_tokens excludes cache reads/writes (additive, unlike
+    // OpenAI/Gemini) — normalize to inclusive-of-cache like every other
+    // provider's tokensIn.
+    const totalInputTokens = (result.usage?.input_tokens ?? 0) + cacheReadTokens + cacheCreationTokens;
 
     span.setAttributes({
       "gen_ai.response.model": result.model,
       "gen_ai.response.id": result.id,
-      "gen_ai.usage.input_tokens": result.usage?.input_tokens ?? 0,
+      "gen_ai.usage.input_tokens": totalInputTokens,
       "gen_ai.usage.output_tokens": result.usage?.output_tokens ?? 0,
+      ...(cacheReadTokens && { "gen_ai.usage.cache_read_tokens": cacheReadTokens }),
+      ...(cacheCreationTokens && { "gen_ai.usage.cache_creation_tokens": cacheCreationTokens }),
       "gen_ai.response.finish_reasons": result.stop_reason ? [result.stop_reason] : [],
       "evalkit.completion": textContent,
       ...(thinkingText && { "gen_ai.response.thinking": thinkingText }),
