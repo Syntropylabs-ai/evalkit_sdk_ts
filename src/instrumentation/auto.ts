@@ -47,8 +47,7 @@ function tryPatchAxios(client: EvalKitClient): void {
 }
 
 async function tryPatchPgAsync(client: EvalKitClient): Promise<void> {
-  // Patch pg.Client.prototype.query — covers node-postgres Client AND Pool
-  // (Pool.query delegates to a Client), and ORMs on top (TypeORM, Sequelize, Knex).
+
   try {
     const _req = getRequire();
     const pg = _req('pg');
@@ -63,7 +62,7 @@ async function tryPatchPgAsync(client: EvalKitClient): Promise<void> {
 }
 
 async function tryPatchMysql2Async(client: EvalKitClient): Promise<void> {
-  // Patch mysql2 Connection prototype — covers callback + promise APIs and pools.
+
   try {
     const _req = getRequire();
     const mysql = _req('mysql2');
@@ -78,8 +77,7 @@ async function tryPatchMysql2Async(client: EvalKitClient): Promise<void> {
 }
 
 async function tryPatchIoredisAsync(client: EvalKitClient): Promise<void> {
-  // ioredis exports the Redis class (stable prototype.sendCommand). node-redis v4
-  // builds commands dynamically per-instance → use the manual patchRedisClient there.
+
   try {
     const _req = getRequire();
     const mod = _req('ioredis');
@@ -206,7 +204,7 @@ async function tryPatchGoogleAIAsync(client: EvalKitClient): Promise<void> {
 }
 
 async function tryPatchGoogleGenAIAsync(client: EvalKitClient): Promise<void> {
-  // @google/genai — the new unified Google SDK (used by newer Google AI + ADK).
+
   try {
     const _req = getRequire();
     const mod = _req('@google/genai');
@@ -221,7 +219,7 @@ async function tryPatchGoogleGenAIAsync(client: EvalKitClient): Promise<void> {
 }
 
 async function tryPatchGroqAsync(client: EvalKitClient): Promise<void> {
-  // groq-sdk mirrors the OpenAI SDK surface (chat.completions.create).
+
   try {
     const _req = getRequire();
     const mod = _req('groq-sdk');
@@ -244,7 +242,7 @@ async function tryPatchLangChainAsync(client: EvalKitClient): Promise<void> {
 }
 
 async function tryPatchGoogleLiveAsync(client: EvalKitClient): Promise<void> {
-  // @google/genai Live (voice over WebSocket) — patch Live.prototype.connect.
+
   try {
     const _req = getRequire();
     const mod = _req('@google/genai');
@@ -259,9 +257,7 @@ async function tryPatchGoogleLiveAsync(client: EvalKitClient): Promise<void> {
 }
 
 async function tryPatchOpenAIRealtimeAsync(client: EvalKitClient): Promise<void> {
-  // OpenAI Realtime (voice over WebSocket) — event-emitter based. Resolve the
-  // realtime WebSocket class from the optional `openai` peer and patch it.
-  // Best-effort: the subpath/export shape varies by openai version.
+
   try {
     const _req = getRequire();
     const mod = _req('openai/beta/realtime/websocket');
@@ -274,7 +270,6 @@ async function tryPatchOpenAIRealtimeAsync(client: EvalKitClient): Promise<void>
     if (typeof RT === 'function') patchOpenAIRealtime(client, RT);
   } catch {}
 }
-
 
 const OTEL_INSTRUMENTATIONS: Array<[string, string]> = [
   ['@prisma/instrumentation', 'PrismaInstrumentation'],
@@ -316,9 +311,7 @@ async function tryRegisterOtelInstrumentations(): Promise<void> {
 }
 
 async function tryPatchGoogleAdkAsync(client: EvalKitClient): Promise<void> {
-  // @google/adk — Runner's exported binding is getter-only (bundler re-export
-  // helper), so we require() the module and let patchGoogleAdk mutate
-  // Runner.prototype directly rather than reassigning the export.
+
   try {
     const _req = getRequire();
     const mod = _req('@google/adk');
@@ -331,7 +324,7 @@ async function tryPatchGoogleAdkAsync(client: EvalKitClient): Promise<void> {
 }
 
 async function tryPatchMcpAsync(client: EvalKitClient): Promise<void> {
-  // @modelcontextprotocol/sdk — patch Client.prototype.callTool → tool_call span.
+
   try {
     const _req = getRequire();
     const mod = _req('@modelcontextprotocol/sdk/client/index.js');
@@ -400,8 +393,7 @@ async function tryPatchChromaAsync(client: EvalKitClient): Promise<void> {
 }
 
 async function tryPatchWeaviateAsync(client: EvalKitClient): Promise<void> {
-  // weaviate-client only exposes its top-level index (see vectordb/weaviate.ts) —
-  // patch the connect*() factory functions themselves, not a class.
+
   try {
     const _req = getRequire();
     const mod = _req('weaviate-client');
@@ -445,11 +437,6 @@ async function tryPatchAssemblyAIAsync(client: EvalKitClient): Promise<void> {
     if (mod?.TranscriptService) patchAssemblyAI(client, mod.TranscriptService);
   } catch {}
 }
-
-// ElevenLabs has no module-level auto-patch path — TextToSpeechClient isn't
-// exported and only reachable through an already-constructed ElevenLabsClient
-// instance, which auto-instrumentation has no way to obtain here. Call
-// patchElevenLabsClientInstance(client) manually on your own client instead.
 
 export function setupAutoInstrumentation(client: EvalKitClient): void {
   try { patchIncomingHttp(client); } catch {}

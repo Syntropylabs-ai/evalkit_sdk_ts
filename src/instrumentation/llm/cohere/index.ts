@@ -3,7 +3,6 @@ import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
 import { safeBody } from "../_body.js";
 
-// Matches cohere-ai v2 SDK: client.chat({ model, message, chatHistory, ... })
 type ChatParams = {
   model?: string;
   message?: string;

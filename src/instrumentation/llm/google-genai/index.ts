@@ -4,13 +4,6 @@ import type { EvalKitClient } from "../../../core/client.js";
 import { emitToolCalls, fromGoogleParts } from "../_toolcalls.js";
 import { safeBody } from "../_body.js";
 
-// New unified Google SDK: `@google/genai`.
-//   const ai = new GoogleGenAI({ apiKey });
-//   ai.models.generateContent({ model, contents, config });
-//   for await (const chunk of await ai.models.generateContentStream({...})) {}
-// Patched at the Models prototype level so every client instance — including
-// those created internally by frameworks/ADK — is traced.
-
 type Part = { text?: string; functionCall?: { name?: string; args?: Record<string, unknown>; id?: string } };
 type Content = { role?: string; parts?: Part[] };
 type GenAIRequest = {
@@ -71,7 +64,7 @@ function buildPrompt(req: GenAIRequest): string {
 }
 
 function completionFrom(resp: GenAIResponse): string {
-  // Join all text parts across candidates.
+
   const parts: string[] = [];
   for (const cand of resp?.candidates ?? []) {
     for (const p of cand.content?.parts ?? []) {
@@ -82,8 +75,6 @@ function completionFrom(resp: GenAIResponse): string {
   return resp?.text ?? "";
 }
 
-// Lazily bound so recordToolCalls (called from two sites) can reach the client
-// without threading it through every call.
 let _client: EvalKitClient | null = null;
 
 function recordToolCalls(resp: GenAIResponse, span: Span, _traceId?: string | undefined): void {
@@ -133,15 +124,12 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
         "gen_ai.usage.total_tokens": result?.usageMetadata?.totalTokenCount ?? 0,
         "evalkit.completion": completionFrom(result),
       });
-      // Subset of input_tokens Gemini served from its (cheaper) context cache —
-      // already included above, never additive. Surfaced separately so
-      // downstream cost math isn't forced to price a long, mostly-cached
-      // prompt at the full fresh-input-token rate.
+
       const cachedTokens = result?.usageMetadata?.cachedContentTokenCount ?? 0;
       if (cachedTokens) span.setAttribute("gen_ai.usage.cached_tokens", cachedTokens);
       const respBody = safeBody(result);
       if (respBody) span.setAttribute("gen_ai.response.body", respBody);
-      try { recordToolCalls(result, span, span.spanContext().traceId); } catch { /* never break */ }
+      try { recordToolCalls(result, span, span.spanContext().traceId); } catch {  }
       span.setStatus({ code: SpanStatusCode.OK });
       span.end();
       return result;
@@ -199,7 +187,7 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
                 tcached = chunk.usageMetadata.cachedContentTokenCount ?? tcached;
               }
               recordToolCalls(chunk, span, span.spanContext().traceId);
-            } catch { /* never break the stream */ }
+            } catch {  }
             yield chunk;
           }
           span.setAttributes({

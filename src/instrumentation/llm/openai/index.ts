@@ -37,12 +37,6 @@ type CreateParams = {
 };
 type Completions = { create: (...args: unknown[]) => Promise<unknown> };
 
-/**
- * Wraps an OpenAI streaming response (AsyncIterable) in a Proxy so that:
- * - All original methods are preserved (controller, toReadableStream, tee, etc.)
- * - Symbol.asyncIterator is overridden to accumulate chunks and end the span
- *   when the stream is exhausted.
- */
 function wrapOpenAIStream(stream: any, span: Span, startMs: number = Date.now()): any {
   let content = '';
   let tokensIn = 0;
@@ -159,7 +153,6 @@ export function patchOpenAI(
 
     const spanCtx = trace.setSpan(ctx, span);
 
-    // Streaming path — wrap the stream to accumulate content and end span on exhaustion
     if (params?.stream) {
       const streamStartMs = Date.now();
       let stream: unknown;
@@ -206,7 +199,6 @@ export function patchOpenAI(
     const respBody = safeBody(result);
     if (respBody) span.setAttribute("gen_ai.response.body", respBody);
 
-    // Tool calls -> event on this span + child tool_call span + sim record (one path).
     emitToolCalls(client, span, fromOpenAIChat(result));
 
     span.setStatus({ code: SpanStatusCode.OK });

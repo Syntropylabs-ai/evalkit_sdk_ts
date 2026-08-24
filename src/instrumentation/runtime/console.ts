@@ -18,11 +18,10 @@ export function patchConsole(client: EvalKitClient): void {
   const addLogEvent = (level: string, msg: string): void => {
     const active = trace.getActiveSpan();
     if (active?.isRecording()) {
-      // Attach as a span event — visible in the trace waterfall
+
       active.addEvent(`log.${level}`, { 'log.level': level, 'log.message': msg });
     } else {
-      // Background task or no active context — create a standalone log span
-      // so the log still appears in the trace service even after the parent span ended.
+
       const span = client.tracer.startSpan(`log.${level}`, {
         kind: SpanKind.INTERNAL,
         attributes: {

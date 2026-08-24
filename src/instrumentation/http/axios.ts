@@ -23,7 +23,6 @@ export function patchAxios(client: EvalKitClient, axiosInstance: any): void {
   if ((axiosInstance as any).__evalkit_axios) return;
   (axiosInstance as any).__evalkit_axios = true;
 
-  // Wrap axios.create() so derived instances (NestJS HttpService, etc.) are auto-patched
   if (typeof axiosInstance.create === 'function') {
     const origCreate = axiosInstance.create.bind(axiosInstance);
     axiosInstance.create = function (...args: any[]) {

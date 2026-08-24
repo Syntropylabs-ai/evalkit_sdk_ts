@@ -6,18 +6,6 @@ export interface HonoMiddlewareOptions {
   name?: string | ((c: any) => string);
 }
 
-/**
- * Hono middleware that auto-traces every incoming request.
- * Edge-compatible (Cloudflare Workers, Vercel Edge, Deno Deploy).
- *
- * @example
- * import { Hono } from 'hono';
- * import evalkit from 'syntropylabs-evalkit';
- *
- * evalkit.init({ subscriptionKey: '...', serviceName: 'my-api' });
- * const app = new Hono();
- * app.use('*', evalkit.honoMiddleware());
- */
 export function createHonoMiddleware(
   client: EvalKitClient,
   options?: HonoMiddlewareOptions,
@@ -47,12 +35,12 @@ export function createHonoMiddleware(
       const sc = c.res?.status ?? 200;
       let responseBody: string | undefined;
       try {
-        // Clone to avoid consuming the original response stream.
+
         if (c.res && typeof c.res.clone === 'function') {
           const text = await c.res.clone().text();
           if (text) responseBody = text.slice(0, client.options.maxBodyBytes);
         }
-      } catch { /* ignore — edge runtimes may restrict clone */ }
+      } catch {  }
       end(sc >= 400 ? 'ERROR' : 'OK', { statusCode: sc, body: responseBody });
     } catch (err: any) {
       end('ERROR', { statusCode: 500 });

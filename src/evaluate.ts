@@ -1,60 +1,47 @@
-// ---------------------------------------------------------------------------
-// Offline evaluation metrics — computed locally without LLM calls.
-// Results are pushed as a span to the trace service for observability.
-// ---------------------------------------------------------------------------
-
 export type OfflineMetric =
-  | 'tool_trajectory'       // order-aware LCS match of tool call sequences
-  | 'tool_f1'               // precision+recall F1 on tool name sets
-  | 'tool_correctness'      // recall: fraction of expected tools that were called
-  | 'response_match'        // fraction of required terms found in output
-  | 'constraint_compliance' // structural constraints (slide count, terms, citations)
-  | 'contextual_precision'  // of retrieved context chunks, fraction that are relevant
-  | 'contextual_recall';    // of expected context chunks, fraction that were retrieved
+  | 'tool_trajectory'
+  | 'tool_f1'
+  | 'tool_correctness'
+  | 'response_match'
+  | 'constraint_compliance'
+  | 'contextual_precision'
+  | 'contextual_recall';
 
 export interface OfflineEvalInput {
-  /** The agent or model output to evaluate. Required. */
+
   output: string;
-  /** The original user input / query (optional, used for context). */
+
   input?: string;
-  /** Reference / expected output (optional, for response_match). */
+
   expectedOutput?: string;
-  /** Actual tool calls made by the agent. */
+
   toolCalls?: Array<{ name: string; args?: Record<string, unknown> }>;
-  /** Expected tool names in the expected call order. */
+
   expectedTools?: string[];
-  /** Retrieved context chunks (for RAG precision/recall). */
+
   retrievedContext?: string[];
-  /** Expected relevant context chunks (for RAG precision/recall). */
+
   expectedContext?: string[];
-  /** Structural constraints to check in the output. */
+
   constraints?: {
-    /** Expected number of slides/sections in the generated spec. */
+
     slideCount?: number;
-    /** Terms that must appear in the output (case-insensitive). */
+
     requiredTerms?: string[];
-    /** Whether the output must contain citations/references. */
+
     hasCitations?: boolean;
   };
-  /** Which metrics to compute. Defaults to all applicable metrics. */
+
   metrics?: OfflineMetric[];
 }
 
 export interface OfflineEvalResult {
-  /** Metric scores in the range [0.0, 1.0]. Only computed metrics are present. */
+
   scores: Partial<Record<OfflineMetric, number>>;
-  /** Per-metric diagnostic details. */
+
   details: Partial<Record<OfflineMetric, Record<string, unknown>>>;
 }
 
-// ---------------------------------------------------------------------------
-// Individual metric implementations
-// ---------------------------------------------------------------------------
-
-/**
- * tool_trajectory: order-aware match using Longest Common Subsequence.
- * Score = LCS(actual, expected) / len(expected)
- */
 function scoreToolTrajectory(
   actualTools: string[],
   expectedTools: string[],
@@ -79,9 +66,6 @@ function scoreToolTrajectory(
   return { score: lcsLength / expectedTools.length, lcsLength };
 }
 
-/**
- * tool_f1: F1 score between actual and expected tool name sets.
- */
 function scoreToolF1(
   actualTools: string[],
   expectedTools: string[],
@@ -104,9 +88,6 @@ function scoreToolF1(
   return { score, precision, recall };
 }
 
-/**
- * tool_correctness: recall-only — what fraction of expected tools were called?
- */
 function scoreToolCorrectness(
   actualTools: string[],
   expectedTools: string[],
@@ -118,9 +99,6 @@ function scoreToolCorrectness(
   return { score: called / expectedTools.length, called, total: expectedTools.length };
 }
 
-/**
- * response_match: fraction of requiredTerms found in output (case-insensitive).
- */
 function scoreResponseMatch(
   output: string,
   requiredTerms: string[],
@@ -133,10 +111,6 @@ function scoreResponseMatch(
   return { score: matched.length / requiredTerms.length, matched, missing };
 }
 
-/**
- * constraint_compliance: checks structural constraints.
- * Each applicable constraint contributes equally to the final score.
- */
 function scoreConstraintCompliance(
   output: string,
   constraints: NonNullable<OfflineEvalInput['constraints']>,
@@ -152,14 +126,14 @@ function scoreConstraintCompliance(
   }
 
   if (constraints.hasCitations !== undefined) {
-    // Heuristic: look for common citation patterns
+
     const hasCite = /\[[\d]+\]|\(\w[^)]{1,80}\d{4}\)|\bhttps?:\/\//.test(output);
     checks['hasCitations'] = constraints.hasCitations ? hasCite : !hasCite;
     results.push(checks['hasCitations']);
   }
 
   if (constraints.slideCount !== undefined) {
-    // Heuristic: count "Slide N" or numbered sections in the output
+
     const slidePattern = /slide\s+\d+|section\s+\d+|##\s+\d+\./gi;
     const count = (output.match(slidePattern) ?? []).length;
     const match = count === constraints.slideCount;
@@ -172,9 +146,6 @@ function scoreConstraintCompliance(
   return { score, checks };
 }
 
-/**
- * contextual_precision: of retrieved chunks, what fraction are in expectedContext?
- */
 function scoreContextualPrecision(
   retrieved: string[],
   expected: string[],
@@ -185,9 +156,6 @@ function scoreContextualPrecision(
   return { score: relevant / retrieved.length, relevant, total: retrieved.length };
 }
 
-/**
- * contextual_recall: of expectedContext chunks, what fraction were retrieved?
- */
 function scoreContextualRecall(
   retrieved: string[],
   expected: string[],
@@ -198,29 +166,6 @@ function scoreContextualRecall(
   return { score: covered / expected.length, covered, total: expected.length };
 }
 
-// ---------------------------------------------------------------------------
-// Public evaluate() function
-// ---------------------------------------------------------------------------
-
-/**
- * Compute offline evaluation metrics locally.
- *
- * Results are returned as numeric scores (0–1) and, if the EvalKit SDK has
- * been initialised via evalkit.init(), are also pushed as an `eval_result`
- * span to the trace service so they appear alongside trace data.
- *
- * @example
- * import { evaluate } from 'syntropylabs-evalkit';
- *
- * const result = evaluate({
- *   output: 'The answer is AWS and Azure.',
- *   expectedTools: ['search_tool', 'render_tool'],
- *   toolCalls: [{ name: 'search_tool' }, { name: 'render_tool' }],
- *   constraints: { requiredTerms: ['AWS', 'Azure'] },
- * });
- * // result.scores.tool_f1 → 1.0
- * // result.scores.response_match → 1.0
- */
 export function evaluate(input: OfflineEvalInput): OfflineEvalResult {
   const requestedMetrics = new Set<OfflineMetric>(
     input.metrics ?? [
@@ -240,28 +185,24 @@ export function evaluate(input: OfflineEvalInput): OfflineEvalResult {
   const scores: Partial<Record<OfflineMetric, number>> = {};
   const details: Partial<Record<OfflineMetric, Record<string, unknown>>> = {};
 
-  // tool_trajectory
   if (requestedMetrics.has('tool_trajectory') && expectedTools.length > 0) {
     const r = scoreToolTrajectory(actualToolNames, expectedTools);
     scores['tool_trajectory'] = r.score;
     details['tool_trajectory'] = { lcsLength: r.lcsLength, expectedCount: expectedTools.length };
   }
 
-  // tool_f1
   if (requestedMetrics.has('tool_f1') && (actualToolNames.length > 0 || expectedTools.length > 0)) {
     const r = scoreToolF1(actualToolNames, expectedTools);
     scores['tool_f1'] = r.score;
     details['tool_f1'] = { precision: r.precision, recall: r.recall };
   }
 
-  // tool_correctness
   if (requestedMetrics.has('tool_correctness') && expectedTools.length > 0) {
     const r = scoreToolCorrectness(actualToolNames, expectedTools);
     scores['tool_correctness'] = r.score;
     details['tool_correctness'] = { called: r.called, total: r.total };
   }
 
-  // response_match
   const requiredTerms = input.constraints?.requiredTerms ?? [];
   if (requestedMetrics.has('response_match') && requiredTerms.length > 0) {
     const r = scoreResponseMatch(input.output, requiredTerms);
@@ -269,14 +210,12 @@ export function evaluate(input: OfflineEvalInput): OfflineEvalResult {
     details['response_match'] = { matched: r.matched, missing: r.missing };
   }
 
-  // constraint_compliance
   if (requestedMetrics.has('constraint_compliance') && input.constraints) {
     const r = scoreConstraintCompliance(input.output, input.constraints);
     scores['constraint_compliance'] = r.score;
     details['constraint_compliance'] = { checks: r.checks };
   }
 
-  // contextual_precision
   if (
     requestedMetrics.has('contextual_precision') &&
     input.retrievedContext !== undefined &&
@@ -287,7 +226,6 @@ export function evaluate(input: OfflineEvalInput): OfflineEvalResult {
     details['contextual_precision'] = { relevant: r.relevant, total: r.total };
   }
 
-  // contextual_recall
   if (
     requestedMetrics.has('contextual_recall') &&
     input.retrievedContext !== undefined &&
@@ -300,10 +238,6 @@ export function evaluate(input: OfflineEvalInput): OfflineEvalResult {
 
   const result: OfflineEvalResult = { scores, details };
 
-  // Push scores as an eval_result span if the SDK is initialised. Use a dynamic
-  // import (works in BOTH ESM and CJS) rather than require() — index.ts imports
-  // this file, so a static import would be circular, and require() is undefined in
-  // native ESM consumers. Fire-and-forget: evaluate() stays synchronous.
   const spanAttrs: Record<string, string | number | boolean> = {
     'evalkit.span_type': 'eval_result',
     'evalkit.eval_type': 'offline',
@@ -313,7 +247,7 @@ export function evaluate(input: OfflineEvalInput): OfflineEvalResult {
   }
   void import('./index.js')
     .then((sdk) => { const { end } = sdk.startSpan('evaluation', spanAttrs); end('OK'); })
-    .catch(() => { /* SDK not initialised — skip span push silently */ });
+    .catch(() => {  });
 
   return result;
 }

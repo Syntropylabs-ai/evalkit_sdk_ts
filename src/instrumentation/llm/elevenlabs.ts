@@ -2,8 +2,6 @@ import { SpanKind, SpanStatusCode, context as otelContext } from "@opentelemetry
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody } from "./_body.js";
 
-
-
 function patchConvert(client: EvalKitClient, proto: any): void {
   if (typeof proto?.convert !== "function" || proto.convert.__evalkit) return;
   const original = proto.convert;
@@ -40,12 +38,10 @@ function patchConvert(client: EvalKitClient, proto: any): void {
   proto.convert = traced;
 }
 
-/** Call on any ElevenLabsClient instance you already have — patches the shared
- *  TextToSpeechClient.prototype, covering every client instance afterward. */
 export function patchElevenLabsClientInstance(client: EvalKitClient, elevenLabsClient: any): any {
   try {
     const proto = Object.getPrototypeOf(elevenLabsClient?.textToSpeech);
     if (proto) patchConvert(client, proto);
-  } catch { /* never throw into the caller */ }
+  } catch {  }
   return elevenLabsClient;
 }

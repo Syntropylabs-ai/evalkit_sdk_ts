@@ -4,10 +4,6 @@ import type { EvalKitClient } from "../../../core/client.js";
 import { patchAnthropic } from "../anthropic/index.js";
 import { safeBody } from "../_body.js";
 
-// ─── Anthropic on Vertex AI ────────────────────────────────────────────────
-// AnthropicVertex from @anthropic-ai/sdk/vertex uses the same messages.create
-// API surface as the direct Anthropic SDK. We reuse the same patcher.
-
 type AnthropicMessages = { create: (...args: unknown[]) => Promise<unknown> };
 
 export function patchAnthropicVertex(
@@ -17,9 +13,6 @@ export function patchAnthropicVertex(
 ): void {
   patchAnthropic(client, messages, parentCtx);
 }
-
-// ─── Google Cloud Vertex AI (generative-ai) ───────────────────────────────
-// @google-cloud/vertexai: generativeModel.generateContent({ contents: [...] })
 
 type VertexContent = { role?: string; parts: Array<{ text?: string }> };
 type VertexRequest = { contents?: VertexContent[]; systemInstruction?: { parts: Array<{ text?: string }> } };
@@ -98,8 +91,7 @@ export function patchVertexGenerativeModel(
       'gen_ai.response.finish_reasons': firstCandidate?.finishReason ? [firstCandidate.finishReason] : [],
       'evalkit.completion': completionText,
     });
-    // Subset of input_tokens Gemini served from its (cheaper) context cache —
-    // already included above, never additive.
+
     const cachedTokens = resp?.usageMetadata?.cachedContentTokenCount ?? 0;
     if (cachedTokens) span.setAttribute('gen_ai.usage.cached_tokens', cachedTokens);
 

@@ -18,7 +18,7 @@ function safeIO(value: unknown, limit: number = IO_MAX): string | undefined {
   try {
     s = JSON.stringify(value);
   } catch {
-    /* fall through */
+
   }
   if (s === undefined) {
     try {
@@ -30,7 +30,6 @@ function safeIO(value: unknown, limit: number = IO_MAX): string | undefined {
   return s.length > limit ? s.slice(0, limit) + "…" : s;
 }
 
-/** Build a single capture attribute, omitted entirely when value is undefined/unserializable. */
 function ioAttr(key: string, value: unknown, captureIO: boolean): Record<string, string> | undefined {
   if (!captureIO) return undefined;
   const s = safeIO(value);
@@ -211,8 +210,7 @@ export class EvalKitClient {
   ): T {
     const self = this;
     return function (this: any, ...args: any[]) {
-      // Tracing must NEVER prevent the host function from running. If span setup
-      // throws for any reason, fall back to calling the original untraced.
+
       let ctx: OtelContext;
       let end: (status?: 'OK' | 'ERROR', extra?: Record<string, string | number | boolean>) => void;
       try {
@@ -228,7 +226,7 @@ export class EvalKitClient {
       }
 
       const safeEnd = (status: 'OK' | 'ERROR', extra?: Record<string, string | number | boolean>) => {
-        try { end(status, extra); } catch { /* never throw from tracing */ }
+        try { end(status, extra); } catch {  }
       };
 
       let result: any;
@@ -236,7 +234,7 @@ export class EvalKitClient {
         result = context.with(ctx, () => fn.apply(this, args));
       } catch (err: any) {
         const error = err instanceof Error ? err : new Error(String(err));
-        try { trace.getSpan(ctx)?.recordException(error); } catch { /* ignore */ }
+        try { trace.getSpan(ctx)?.recordException(error); } catch {  }
         safeEnd('ERROR', errorAttrs(error));
         throw err;
       }
@@ -246,7 +244,7 @@ export class EvalKitClient {
           (v: any) => { safeEnd('OK', ioAttr('function.result', v, captureIO)); return v; },
           (e: any) => {
             const error = e instanceof Error ? e : new Error(String(e));
-            try { trace.getSpan(ctx)?.recordException(error); } catch { /* ignore */ }
+            try { trace.getSpan(ctx)?.recordException(error); } catch {  }
             safeEnd('ERROR', errorAttrs(error));
             throw e;
           },
@@ -258,11 +256,6 @@ export class EvalKitClient {
     } as T;
   }
 
-  /**
-   * Like traceFunction but emits a first-class tool_call span (renders in the
-   * Input/Output panels and counts toward tool metrics). Use it to wrap your own
-   * client-side tools so they behave like server-side / LangChain tools.
-   */
   traceTool<T extends (...args: any[]) => any>(
     name: string,
     fn: T,
@@ -288,7 +281,7 @@ export class EvalKitClient {
       }
 
       const safeEnd = (status: 'OK' | 'ERROR', extra?: Record<string, string | number | boolean>) => {
-        try { end(status, extra); } catch { /* never throw from tracing */ }
+        try { end(status, extra); } catch {  }
       };
 
       let result: any;
@@ -296,7 +289,7 @@ export class EvalKitClient {
         result = context.with(ctx, () => fn.apply(this, args));
       } catch (err: any) {
         const error = err instanceof Error ? err : new Error(String(err));
-        try { trace.getSpan(ctx)?.recordException(error); } catch { /* ignore */ }
+        try { trace.getSpan(ctx)?.recordException(error); } catch {  }
         safeEnd('ERROR', errorAttrs(error));
         throw err;
       }
@@ -306,7 +299,7 @@ export class EvalKitClient {
           (v: any) => { safeEnd('OK', ioAttr('tool.result', v, captureIO)); return v; },
           (e: any) => {
             const error = e instanceof Error ? e : new Error(String(e));
-            try { trace.getSpan(ctx)?.recordException(error); } catch { /* ignore */ }
+            try { trace.getSpan(ctx)?.recordException(error); } catch {  }
             safeEnd('ERROR', errorAttrs(error));
             throw e;
           },

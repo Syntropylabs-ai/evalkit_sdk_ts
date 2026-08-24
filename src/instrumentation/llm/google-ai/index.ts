@@ -3,8 +3,6 @@ import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
 import { safeBody } from "../_body.js";
 
-// Matches @google/generative-ai SDK (Gemini)
-// generativeModel.generateContent(request) or generateContent(string)
 type Part = { text?: string; inlineData?: unknown };
 type Content = { role?: string; parts: Part[] };
 type GenerateContentRequest = {

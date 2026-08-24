@@ -23,50 +23,6 @@ function textOf(content: ContentLike): string {
   return parts.map((p) => p.text ?? "").join("");
 }
 
-/**
- * Instrumentation for Google ADK (Agent Development Kit) — the JS/TS SDK
- * (`@google/adk`, a separate package from Python's `google-adk`).
- *
- * Two spans come from this:
- *
- *   - `tool_call`, registered as an ADK Plugin (`BasePlugin` —
- *     google/adk-js core/src/plugins/base_plugin.ts, ADK's own documented
- *     extension mechanism). `beforeToolCallback`/`afterToolCallback`/
- *     `onToolErrorCallback` are wired all the way through in
- *     @google/adk@1.4.0 (confirmed by tracing plugin_manager.js's
- *     runBeforeToolCallback/runAfterToolCallback into agents/functions.js),
- *     so a real OTel span is started before the tool runs and ended after —
- *     exact latency, not a guessed duration.
- *
- *   - `function_call` (operation `run_agent`), from wrapping
- *     `BaseAgent.prototype.runAsync` directly instead of the plugin
- *     system's `beforeAgentCallback`/`afterAgentCallback`: those plugin
- *     hooks exist on `BasePlugin` and `PluginManager.runBeforeAgentCallback`/
- *     `runAfterAgentCallback` are implemented, but nothing in Runner or the
- *     agents actually calls them in this version (verified: those two
- *     PluginManager methods have zero call sites anywhere else in the
- *     package) — an incomplete wire-up in a package published only a day
- *     before this was written, not a Plugin misuse on our part. `runAsync`
- *     is the one method every agent type funnels through regardless
- *     (LlmAgent and friends override `runAsyncImpl`, not `runAsync`
- *     itself), so patching it once covers the root agent and every
- *     delegated sub-agent. The result text is read back from
- *     `session.events`: every event ADK appends carries `author` (the
- *     producing agent's name) and `timestamp`, so a nested sub-agent's own
- *     turn cleanly filters to just its own events instead of picking up its
- *     parent's or siblings'. Shaped to match the dashboard convention
- *     (trace-analysis.service.ts's `firstArg`/`extractAgentText`) the
- *     Python SDK's ADK integration and the simulation framework both use.
- *
- * `Runner`'s own exported class binding can't be reassigned (its bundler's
- * re-export helper defines it as a getter with no setter — `Object.defineProperty`
- * without `configurable`, so even redefining it throws), which is why this
- * patches `Runner.prototype`/`BaseAgent.prototype` in place rather than
- * subclassing and swapping the export, like every other patch in this file.
- *
- * LLM calls are not duplicated here: ADK's model calls go through
- * `@google/genai`, already patched separately (see llm/google-genai).
- */
 export function patchGoogleAdk(client: EvalKitClient, adkModule: any): void {
   const Runner = adkModule?.Runner;
   const BaseAgent = adkModule?.BaseAgent;
@@ -99,7 +55,7 @@ export function patchGoogleAdk(client: EvalKitClient, adkModule: any): void {
           },
         });
         toolSpans.set(params.toolContext, span);
-      } catch { /* tracing must never break the tool call */ }
+      } catch {  }
       return undefined;
     }
 
@@ -117,7 +73,7 @@ export function patchGoogleAdk(client: EvalKitClient, adkModule: any): void {
           span.setStatus({ code: SpanStatusCode.OK });
           span.end();
         }
-      } catch { /* ignore */ }
+      } catch {  }
       return undefined;
     }
 
@@ -135,7 +91,7 @@ export function patchGoogleAdk(client: EvalKitClient, adkModule: any): void {
           span.setStatus({ code: SpanStatusCode.ERROR, message: params.error?.message });
           span.end();
         }
-      } catch { /* ignore */ }
+      } catch {  }
       return undefined;
     }
   }
@@ -151,7 +107,7 @@ export function patchGoogleAdk(client: EvalKitClient, adkModule: any): void {
       if (this.pluginManager?.getPlugin && !this.pluginManager.getPlugin("evalkit")) {
         this.pluginManager.registerPlugin?.(evalkitPlugin);
       }
-    } catch { /* ignore */ }
+    } catch {  }
     return originalRunnerRunAsync.apply(this, args as never[]);
   };
   (Runner.prototype.runAsync as { __evalkit?: boolean }).__evalkit = true;
@@ -176,7 +132,7 @@ export function patchGoogleAdk(client: EvalKitClient, adkModule: any): void {
           "gen_ai.agent.name": agentName,
         },
       });
-    } catch { /* ignore */ }
+    } catch {  }
 
     try {
       yield* originalAgentRunAsync.call(this, parentContext, ...(rest as never[]));
@@ -198,7 +154,7 @@ export function patchGoogleAdk(client: EvalKitClient, adkModule: any): void {
             truncate(toJson({ text, tool_calls: toolCalls, retrieved_context: [] })),
           );
           span.setStatus({ code: SpanStatusCode.OK });
-        } catch { /* ignore */ }
+        } catch {  }
         span.end();
       }
     } catch (err) {
@@ -206,7 +162,7 @@ export function patchGoogleAdk(client: EvalKitClient, adkModule: any): void {
         try {
           span.recordException(err instanceof Error ? err : new Error(String(err)));
           span.setStatus({ code: SpanStatusCode.ERROR, message: err instanceof Error ? err.message : String(err) });
-        } catch { /* ignore */ }
+        } catch {  }
         span.end();
       }
       throw err;

@@ -30,7 +30,7 @@ export function patchMcp(client: EvalKitClient, target: any): void {
   const original = proto.callTool;
 
   proto.callTool = async function (this: unknown, ...args: unknown[]): Promise<unknown> {
-    // Tracing must never break the tool call: if span setup throws, run untraced.
+
     let span: ReturnType<typeof client.tracer.startSpan>;
     let spanCtx: ReturnType<typeof trace.setSpan>;
     try {
@@ -67,7 +67,7 @@ export function patchMcp(client: EvalKitClient, target: any): void {
           span.setAttribute("gen_ai.tool.call.result", text);
         }
         span.setStatus({ code: result?.isError ? SpanStatusCode.ERROR : SpanStatusCode.OK });
-      } catch { /* never throw from tracing */ }
+      } catch {  }
       span.end();
       return result;
     } catch (err) {
@@ -75,7 +75,7 @@ export function patchMcp(client: EvalKitClient, target: any): void {
         const e = err instanceof Error ? err : new Error(String(err));
         span.recordException(e);
         span.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
-      } catch { /* ignore */ }
+      } catch {  }
       span.end();
       throw err;
     }

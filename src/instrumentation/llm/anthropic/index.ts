@@ -25,11 +25,6 @@ type CreateParams = {
 };
 type Messages = { create: (...args: unknown[]) => Promise<unknown> };
 
-/**
- * Pulls extended-thinking text out of an Anthropic response's content blocks.
- * Redacted blocks carry only an opaque encrypted payload (no readable text),
- * so we just flag their presence.
- */
 function extractThinking(content: ContentBlock[]): { thinkingText: string; hasRedactedThinking: boolean } {
   const thinkingText = content
     .filter((b) => b.type === "thinking")
@@ -39,16 +34,6 @@ function extractThinking(content: ContentBlock[]): { thinkingText: string; hasRe
   return { thinkingText, hasRedactedThinking };
 }
 
-/**
- * Wraps an Anthropic streaming response (AsyncIterable) in a Proxy.
- * Accumulates content/token counts and ends the span when the stream is exhausted.
- *
- * Anthropic streaming events:
- *   message_start        → message.usage.input_tokens
- *   content_block_delta  → delta.text (text_delta type)
- *   message_delta        → usage.output_tokens
- *   message_stop         → stream done
- */
 function wrapAnthropicStream(stream: any, span: Span, startMs: number = Date.now()): any {
   let content = '';
   let thinking = '';
@@ -76,9 +61,7 @@ function wrapAnthropicStream(stream: any, span: Span, startMs: number = Date.now
     } else if (type === 'message_start') {
       cacheReadTokens = event.message?.usage?.cache_read_input_tokens ?? 0;
       cacheCreationTokens = event.message?.usage?.cache_creation_input_tokens ?? 0;
-      // Anthropic's input_tokens excludes cache reads/writes (additive, unlike
-      // OpenAI/Gemini) — normalize to inclusive-of-cache like every other
-      // provider's tokensIn.
+
       tokensIn = (event.message?.usage?.input_tokens ?? 0) + cacheReadTokens + cacheCreationTokens;
     } else if (type === 'message_delta') {
       tokensOut = event.usage?.output_tokens ?? 0;
@@ -181,7 +164,6 @@ export function patchAnthropic(
 
     const spanCtx = trace.setSpan(ctx, span);
 
-    // Streaming path — wrap the stream to accumulate content and end span on exhaustion
     if (params?.stream) {
       const streamStartMs = Date.now();
       let stream: unknown;
@@ -215,9 +197,7 @@ export function patchAnthropic(
     const { thinkingText, hasRedactedThinking } = extractThinking(result.content);
     const cacheReadTokens = result.usage?.cache_read_input_tokens ?? 0;
     const cacheCreationTokens = result.usage?.cache_creation_input_tokens ?? 0;
-    // Anthropic's input_tokens excludes cache reads/writes (additive, unlike
-    // OpenAI/Gemini) — normalize to inclusive-of-cache like every other
-    // provider's tokensIn.
+
     const totalInputTokens = (result.usage?.input_tokens ?? 0) + cacheReadTokens + cacheCreationTokens;
 
     span.setAttributes({
@@ -236,7 +216,6 @@ export function patchAnthropic(
     const respBody = safeBody(result);
     if (respBody) span.setAttribute("gen_ai.response.body", respBody);
 
-    // Tool calls -> event on this span + child tool_call span + sim record (one path).
     emitToolCalls(client, span, fromAnthropicBlocks(result.content));
 
     span.setStatus({ code: SpanStatusCode.OK });

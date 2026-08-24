@@ -30,12 +30,10 @@ export function createExpressMiddleware(
     (req as any)._evalkitCtx = ctx;
     (req as any)._evalkitTraceId = traceId;
 
-    // Inject trace_id into response so clients can correlate.
     const spanId = otelTrace.getSpan(ctx)?.spanContext().spanId ?? '0000000000000000';
     res.setHeader?.('x-trace-id', traceId);
     res.setHeader?.('traceparent', `00-${traceId}-${spanId}-01`);
 
-    // Capture response body — accumulate chunks from write() + end() up to the configured limit.
     const BODY_MAX = client.options.maxBodyBytes;
     const bodyChunks: Buffer[] = [];
     let bodyLen = 0;
@@ -48,7 +46,7 @@ export function createExpressMiddleware(
             ? Buffer.from(chunk)
             : null;
         if (b?.length) { bodyChunks.push(b); bodyLen += b.length; }
-      } catch { /* never affect the response */ }
+      } catch {  }
     };
 
     const origWrite = (res.write as (...args: any[]) => any).bind(res);
@@ -66,7 +64,7 @@ export function createExpressMiddleware(
       if (bodyChunks.length) {
         try {
           responseBody = Buffer.concat(bodyChunks).subarray(0, BODY_MAX).toString('utf-8');
-        } catch { /* ignore */ }
+        } catch {  }
       }
       end(sc >= 400 ? 'ERROR' : 'OK', {
         statusCode: sc,

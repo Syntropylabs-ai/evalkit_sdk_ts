@@ -1,20 +1,6 @@
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody, startVectorDb } from "./_common.js";
 
-// Patch chromadb's collection query/add/upsert.
-//
-// The `chromadb` package (v3+) does NOT export its main `CollectionImpl` class —
-// only `CollectionHandle` (a lightweight subclass returned by `client.collection(id)`)
-// is public. `CollectionHandle extends CollectionImpl` but only overrides
-// add/update/upsert, not query. We reach the shared base prototype via
-// `Object.getPrototypeOf(CollectionHandle.prototype)`, which IS the real
-// `CollectionImpl.prototype` object used by every collection instance
-// (getCollection/createCollection/getOrCreateCollection all return CollectionImpl
-// directly) — patching it there covers those, and patching CollectionHandle's own
-// overridden add/upsert covers collections obtained via `client.collection(id)`.
-//
-// Never captures raw embeddings — only ids/distances and counts.
-
 function ownMethod(proto: any, name: string): boolean {
   return !!proto && Object.prototype.hasOwnProperty.call(proto, name) && typeof proto[name] === "function";
 }
@@ -41,7 +27,7 @@ function flattenMatches(result: any): Array<{ id: any; distance: any }> {
       const batchDistances = distances[bi] ?? [];
       batchIds.forEach((id, i) => out.push({ id, distance: batchDistances[i] ?? null }));
     });
-  } catch { /* ignore */ }
+  } catch {  }
   return out;
 }
 

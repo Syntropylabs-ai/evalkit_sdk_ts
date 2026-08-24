@@ -1,7 +1,5 @@
 const STACK_MAX = 8192;
 
-/** First stack frame that belongs to app code (skips node internals + node_modules),
- *  as `file:line:col` — the "where did this come from" pointer. */
 export function firstStackFrame(stack?: string): string | undefined {
   if (!stack) return undefined;
   const lines = stack.split('\n').slice(1);
@@ -14,8 +12,6 @@ export function firstStackFrame(stack?: string): string | undefined {
   return undefined;
 }
 
-/** Span attributes describing an error: message, type, source location, stack.
- *  Never throws. */
 export function errorAttrs(err: unknown): Record<string, string> {
   const e = err instanceof Error ? err : new Error(String(err));
   const a: Record<string, string> = {
@@ -26,6 +22,6 @@ export function errorAttrs(err: unknown): Record<string, string> {
     const src = firstStackFrame(e.stack);
     if (src) a['error.source'] = src;
     if (e.stack) a['error.stack'] = e.stack.length > STACK_MAX ? e.stack.slice(0, STACK_MAX) + '…' : e.stack;
-  } catch { /* never throw */ }
+  } catch {  }
   return a;
 }

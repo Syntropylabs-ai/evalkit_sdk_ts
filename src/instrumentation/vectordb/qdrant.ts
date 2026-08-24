@@ -1,16 +1,12 @@
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody, startVectorDb } from "./_common.js";
 
-// Patch @qdrant/js-client-rest's QdrantClient.query/upsert at the class level.
-// Same rationale as vectordb/pinecone.ts. Never captures raw vectors — only
-// point ids and scores/distance metadata.
-
 function pointsSummary(response: any): Array<{ id: any; score: any }> {
   const out: Array<{ id: any; score: any }> = [];
   try {
     const points = response?.points ?? response ?? [];
     for (const p of points) out.push({ id: p?.id, score: p?.score });
-  } catch { /* ignore */ }
+  } catch {  }
   return out;
 }
 

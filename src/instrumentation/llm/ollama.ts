@@ -3,14 +3,6 @@ import type { Span } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody } from "./_body.js";
 
-// Patch ollama's Ollama.prototype.chat (covers the default singleton export too,
-// since it's an instance of the same class) — captures message content/thinking/
-// tool_calls, prompt/eval token counts, and TTFT for streaming. Ollama's response
-// shape is NOT OpenAI-compatible (message.content, prompt_eval_count/eval_count,
-// done_reason) so this is a dedicated patch rather than reusing the OpenAI one.
-//
-// Degrades to a no-op if `ollama` isn't installed and never throws into the caller.
-
 type OllamaMessage = { role: string; content: string; thinking?: string; tool_calls?: unknown[] };
 type ChatParams = { model?: string; messages?: OllamaMessage[]; stream?: boolean };
 type ChatResponse = {

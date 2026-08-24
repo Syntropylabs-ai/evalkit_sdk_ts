@@ -3,7 +3,6 @@ import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
 import { safeBody } from "../_body.js";
 
-// Matches @aws-sdk/client-bedrock-runtime ConverseCommand input/output shapes
 type ConverseInput = {
   modelId?: string;
   messages?: Array<{ role: string; content: Array<{ text?: string }> }>;
@@ -20,12 +19,6 @@ type ConverseOutput = {
   usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
 };
 
-/**
- * Pulls Converse API reasoningContent blocks out of the output message.
- * Anthropic (and other reasoning-capable) models on Bedrock surface their
- * chain-of-thought this way; redacted variants carry only an opaque encrypted
- * payload, so we just flag their presence.
- */
 function extractReasoning(content: ConverseContentBlock[]): { thinkingText: string; hasRedactedThinking: boolean } {
   const thinkingText = content
     .map((c) => c.reasoningContent?.reasoningText?.text ?? "")

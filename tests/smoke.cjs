@@ -1,5 +1,3 @@
-// End-to-end smoke test against the built dist. No real providers/network.
-// Run: node tests/smoke.cjs   (after `npm run build`)
 const http = require("http");
 const assert = require("assert");
 
@@ -24,7 +22,6 @@ server.listen(0, async () => {
 
   const client = evalkit.init({ subscriptionKey: "tk_test", baseUrl: `http://127.0.0.1:${port}`, serviceName: "smoke" });
 
-  // 1) evaluate()
   const r = evalkit.evaluate({
     output: "AWS and Azure",
     expectedTools: ["a"],
@@ -34,7 +31,6 @@ server.listen(0, async () => {
   assert.strictEqual(r.scores.tool_f1, 1.0, "evaluate tool_f1");
   assert.strictEqual(r.scores.response_match, 1.0, "evaluate response_match");
 
-  // 2) new @google/genai patcher on a fake Models prototype
   class FakeModels {
     async generateContent(_req) {
       return {
@@ -47,7 +43,6 @@ server.listen(0, async () => {
   evalkit.patchGoogleGenAIModels(FakeModels.prototype);
   await new FakeModels().generateContent({ model: "gemini-2.0-flash", contents: "weather?" });
 
-  // 2b) DB patcher (fake pg) → db_query span (requires an active trace)
   class FakePg {
     async query(_text, _values) { return { rowCount: 2, rows: [] }; }
   }
@@ -58,7 +53,6 @@ server.listen(0, async () => {
   });
   dbTrace.end("OK");
 
-  // 2c) OpenAI-shaped client with a tool call → llm_call + nested tool_call span
   const fakeOpenAI = {
     chat: { completions: { create: async () => ({
       id: "c1", model: "gpt-4o",
@@ -69,14 +63,12 @@ server.listen(0, async () => {
   evalkit.patchOpenAIClient(fakeOpenAI);
   await fakeOpenAI.chat.completions.create({ model: "gpt-4o", messages: [{ role: "user", content: "hi" }] });
 
-  // 2d) MCP client (fake @modelcontextprotocol/sdk Client) → tool_call span with real result
   class FakeMCPClient {
     async callTool(_params) { return { content: [{ type: "text", text: "sum=42" }], isError: false }; }
   }
   evalkit.patchMCPClient(FakeMCPClient);
   await new FakeMCPClient().callTool({ name: "add", arguments: { a: 1, b: 2 } });
 
-  // 2e) Prisma via instrumentPrisma() → db_query span
   const fakePrisma = {
     $extends(ext) {
       const op = ext.query.$allOperations;
@@ -87,14 +79,12 @@ server.listen(0, async () => {
   const prismaCount = await prisma.user.count();
   assert.strictEqual(prismaCount, 7, "instrumentPrisma passes through the result");
 
-  // 2f) Gemini Live via traceLive() → voice.session + voice.turn spans
   let liveOnMessage;
   const fakeAi = { live: { connect: async (p) => { liveOnMessage = p.callbacks.onmessage; return { sendRealtimeInput() {}, close() {} }; } } };
   const liveSession = await evalkit.traceLive(fakeAi, { model: "gemini-live", callbacks: {} }, { sessionId: "voice_1" });
   liveOnMessage({ serverContent: { modelTurn: { parts: [{ text: "hello there" }] }, turnComplete: true } });
   liveSession.close();
 
-  // 2g) traceFunction: undefined result not captured + tracing never crashes the host
   evalkit.traceFunction("voidFn", () => undefined)();
   const crashFn = evalkit.traceFunction("crashFn", () => 99);
   const origStartSpan = client.startSpan.bind(client);
@@ -103,11 +93,9 @@ server.listen(0, async () => {
   client.startSpan = origStartSpan;
   assert.strictEqual(crashRes, 99, "host fn returns even when tracing setup throws");
 
-  // 3) langchainHandler() — no langchain installed → null, no crash
   const lh = await evalkit.langchainHandler();
   assert.strictEqual(lh, null, "langchainHandler null when absent");
 
-  // 4) simulateUser with an explicit tool-returning entrypoint
   const report = await evalkit.simulateUser({
     entrypoint: async (ctx) => ({ text: `answer: ${ctx.message}`, toolCalls: [{ name: "search" }] }),
     scenarios: [
@@ -119,7 +107,6 @@ server.listen(0, async () => {
   assert.strictEqual(report.results.length, 2, "two scenario results");
   assert.strictEqual(report.results[0].scores.tool_correctness, 1.0, "sim tool_correctness");
 
-  // 5) evaluateSimulation() → POSTs to {apiUrl}/simulations/evaluate (BYOK judge)
   let evalReq = null;
   const apiServer = http.createServer((req, res) => {
     let b = "";
@@ -153,7 +140,6 @@ server.listen(0, async () => {
 
   await evalkit.flush();
 
-  // give the exporter a tick to POST
   setTimeout(() => {
     server.close();
 

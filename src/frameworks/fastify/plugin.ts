@@ -77,7 +77,6 @@ export function createFastifyPlugin(
       },
     );
 
-    // onSend fires with the serialized payload before it is sent to the client.
     fastify.addHook(
       'onSend',
       (request: any, reply: any, payload: any, hookDone: (err: null, payload: any) => void) => {
@@ -86,7 +85,7 @@ export function createFastifyPlugin(
             const s = (typeof payload === 'string' ? payload : JSON.stringify(payload)).slice(0, client.options.maxBodyBytes);
             request._evalkitRespBody = s;
           }
-        } catch { /* ignore */ }
+        } catch {  }
         hookDone(null, payload);
       },
     );

@@ -40,7 +40,6 @@ import { setupAutoInstrumentation } from "./instrumentation/auto.js";
 import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitOptions } from "./core/types.js";
 
-// Public type re-exports
 export type { EvalKitOptions, TraceEnvelope, SpanEvent } from "./core/types.js";
 export type { FastifyPluginOptions } from "./frameworks/fastify/plugin.js";
 export type { ExpressMiddlewareOptions } from "./frameworks/express/middleware.js";
@@ -50,16 +49,10 @@ export type { HapiPluginOptions } from "./frameworks/hapi/plugin.js";
 export { EvalKitClient } from "./core/client.js";
 export { EvalKitInterceptor } from "./frameworks/nestjs/interceptor.js";
 
-// Offline evaluation
 export { evaluate } from "./evaluate.js";
 export type { OfflineEvalInput, OfflineEvalResult, OfflineMetric } from "./evaluate.js";
 
-// Scenario generation + simulation
 export type { SimContext, AgentTurnResult, GenerateScenariosOptions, SimulateUserOptions, EvaluateSimulationOptions, EvaluateSimulationResult, SimEvalMetric, SimEvalScenario } from "./simulate.js";
-
-// ---------------------------------------------------------------------------
-// Global singleton — mirrors Sentry / LangFuse init pattern
-// ---------------------------------------------------------------------------
 
 let _instance: EvalKitClient | null = null;
 
@@ -74,10 +67,6 @@ export function init(opts: EvalKitOptions): EvalKitClient {
   setupAutoInstrumentation(_instance);
   return _instance;
 }
-
-// ---------------------------------------------------------------------------
-// Manual patch helpers (optional — auto-patching covers most cases)
-// ---------------------------------------------------------------------------
 
 export function patchOpenAIClient(openaiInstance: any, parentCtx?: OtelContext): void {
   patchOpenAI(getInstance(), openaiInstance.chat.completions, parentCtx);
@@ -107,14 +96,10 @@ export function patchGoogleAIModel(model: any): void {
   _patchGoogleAI(getInstance(), model);
 }
 
-/** Patch the @google/genai Models prototype (new unified Google SDK). Pass the
- *  Models class prototype, e.g. `require("@google/genai").Models.prototype`. */
 export function patchGoogleGenAIModels(modelsProto: any): void {
   _patchGoogleGenAI(getInstance(), modelsProto);
 }
 
-/** Build a LangChain/LangGraph callback handler for the `{ callbacks: [handler] }`
- *  path. init() also registers one globally; this is for explicit attachment. */
 export function langchainHandler(): Promise<any | null> {
   return _langchainCallbackHandler(getInstance());
 }
@@ -163,9 +148,6 @@ export function patchWeaviateClient(weaviateClientModule: any): void {
   _patchWeaviateModule(getInstance(), weaviateClientModule);
 }
 
-// Fallback for real ESM `import`/`await import()` consumers, where the module
-// namespace object is read-only and patchWeaviateClient() can't rebind its
-// exports: call this on a client you already connected yourself.
 export function patchWeaviateClientInstance<T = any>(weaviateClient: T): T {
   return _patchWeaviateClientInstance(getInstance(), weaviateClient);
 }
@@ -174,49 +156,33 @@ export function patchLlamaIndexClient(llamaindexModule: any): void {
   _patchLlamaIndex(getInstance(), llamaindexModule);
 }
 
-// Pass the OpenAI class itself, e.g. `require("openai").default ?? require("openai").OpenAI`.
 export function patchOpenAIAudioClient(OpenAIClass: any): void {
   _patchOpenAIAudio(getInstance(), OpenAIClass);
 }
 
-// ElevenLabs' TextToSpeechClient isn't exported — call this on any client you
-// already constructed; it patches the shared prototype, covering every client
-// instance the process constructs afterward, not just the one passed in.
 export function patchElevenLabsClientInstance<T = any>(elevenLabsClient: T): T {
   return _patchElevenLabsClientInstance(getInstance(), elevenLabsClient);
 }
 
-// Pass assemblyai's TranscriptService class, e.g. `require("assemblyai").TranscriptService`.
 export function patchAssemblyAIClient(TranscriptService: any): void {
   _patchAssemblyAI(getInstance(), TranscriptService);
 }
 
-// Prisma: returns an instrumented client (db_query spans). Use the returned value.
 export function instrumentPrisma<T = any>(prisma: T, opts?: { system?: string }): T {
   return _instrumentPrisma(getInstance(), prisma, opts) as T;
 }
 
-// Gemini Live (voice over WebSocket): drop-in for `ai.live.connect(params)`.
 export function traceLive(ai: any, params: any, opts?: { sessionId?: string; userId?: string }): Promise<any> {
   return _traceLive(getInstance(), ai, params, opts);
 }
 
-// OpenAI Realtime (voice over WebSocket): attach tracing to an already-created
-// realtime connection, e.g. `const rt = new OpenAIRealtimeWebSocket({ model });`
-// then `traceOpenAIRealtime(rt)`. Returns the same connection.
 export function traceOpenAIRealtime(rt: any, opts?: { model?: string; sessionId?: string; userId?: string }): any {
   return _traceOpenAIRealtime(getInstance(), rt, opts);
 }
 
-// Auto-patch the OpenAI realtime WebSocket class so new connections are traced.
-// Pass the class, e.g. `require("openai/beta/realtime/websocket").OpenAIRealtimeWebSocket`.
 export function patchOpenAIRealtimeClass(RealtimeClass: any): void {
   _patchOpenAIRealtime(getInstance(), RealtimeClass);
 }
-
-// ---------------------------------------------------------------------------
-// Framework integrations
-// ---------------------------------------------------------------------------
 
 export function expressMiddleware(
   options?: import("./frameworks/express/middleware.js").ExpressMiddlewareOptions,
@@ -251,10 +217,6 @@ export function hapiPlugin(
 export function createNestjsInterceptor(): EvalKitInterceptor {
   return new EvalKitInterceptor(getInstance());
 }
-
-// ---------------------------------------------------------------------------
-// Tracing helpers
-// ---------------------------------------------------------------------------
 
 export function startTrace(
   name: string,
@@ -296,8 +258,6 @@ export function traceFunction<T extends (...args: any[]) => any>(
   return getInstance().traceFunction(name, fn, attributes, captureIO);
 }
 
-/** Wrap your own client-side tool so it traces as a first-class tool_call span
- *  (Input/Output panels + tool metrics), like server-side / LangChain tools. */
 export function traceTool<T extends (...args: any[]) => any>(
   name: string,
   fn: T,
@@ -343,13 +303,6 @@ export function Traced(options?: { prefix?: string }): ClassDecorator {
   };
 }
 
-/**
- * Trace every function-valued property of an object in place, APM-style — the
- * parity for Python's `trace_module`. Use it for a service object or a CommonJS
- * `module.exports` so all its functions are traced with one call:
- *
- *   export const orders = traceObject({ place, cancel }, { prefix: 'orders' });
- */
 export function traceObject<T extends Record<string, any>>(
   obj: T,
   options?: { prefix?: string; captureIO?: boolean },
@@ -369,20 +322,6 @@ export function traceObject<T extends Record<string, any>>(
   return obj;
 }
 
-/**
- * APM-style auto-tracing for a NestJS app — wraps every provider/controller
- * method so the whole service call tree is traced, no per-class decorators.
- * NestJS is the one framework with a DI registry the SDK can enumerate; for
- * other frameworks use `traceObject` / `traceFunction` on your modules.
- *
- * Usage (main.ts), after `const app = await NestFactory.create(...)` — one line,
- * pass the app and the SDK resolves DiscoveryService itself (requires
- * DiscoveryModule in AppModule, which Nest provides by default):
- *   await evalkit.enableNestjsAutoTrace(app);
- *
- * You may also pass a DiscoveryService directly. Returns the number of methods
- * wrapped (0 if discovery couldn't be resolved — never throws).
- */
 type DiscoveryService = {
   getProviders: () => Array<{ instance?: unknown }>;
   getControllers: () => Array<{ instance?: unknown }>;
@@ -397,12 +336,9 @@ export async function enableNestjsAutoTrace(
   if (typeof candidate.getProviders === 'function' && typeof candidate.getControllers === 'function') {
     discovery = appOrDiscovery as DiscoveryService;
   } else if (typeof candidate.get === 'function') {
-    // It's a Nest app — resolve DiscoveryService from its DI container so callers
-    // don't have to import @nestjs/core themselves. Dynamic import keeps the SDK
-    // framework-free.
+
     try {
-      // Non-literal specifier so TS doesn't require @nestjs/core at build time —
-      // it's an optional runtime dependency, present in any NestJS app.
+
       const nestCoreSpecifier = '@nestjs/core';
       const nestCore = (await import(nestCoreSpecifier)) as { DiscoveryService?: unknown };
       if (nestCore.DiscoveryService) {
@@ -420,7 +356,6 @@ export function withTrace<T>(ctx: OtelContext, fn: () => Promise<T>): Promise<T>
   return otelContext.with(ctx, fn);
 }
 
-/** Return the trace ID of the currently active span, or undefined if no span is active. */
 export function currentTraceId(): string | undefined {
   const span = otelTrace.getActiveSpan();
   return span?.isRecording() ? span.spanContext().traceId : undefined;
@@ -454,7 +389,7 @@ export default {
   generateScenarios,
   simulateUser,
   evaluateSimulation,
-  // Manual patch helpers
+
   patchOpenAIClient,
   patchAnthropicClient,
   patchBedrockClient,
@@ -484,14 +419,14 @@ export default {
   traceLive,
   traceOpenAIRealtime,
   patchOpenAIRealtimeClass,
-  // Framework integrations
+
   expressMiddleware,
   fastifyPlugin,
   koaMiddleware,
   honoMiddleware,
   hapiPlugin,
   createNestjsInterceptor,
-  // Tracing helpers
+
   startTrace,
   startHttpTrace,
   startSpan,

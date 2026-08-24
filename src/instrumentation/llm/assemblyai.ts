@@ -2,24 +2,6 @@ import { SpanKind, SpanStatusCode, context as otelContext } from "@opentelemetry
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody } from "./_body.js";
 
-// Patch AssemblyAI's TranscriptService.transcribe at the class level.
-//
-// Billed by audio duration, not tokens — cost is proportional to
-// response.audio_duration (seconds), NOT the length of response.audio_url. A
-// shared helper in OpenLit's own Python SDK conflates the two (treats any
-// non-empty "prompt"-like string as character-billed), silently pricing
-// AssemblyAI transcripts off the URL string length instead of actual audio
-// duration — confirmed by reading their real source. We use audio_duration
-// only.
-//
-// AssemblyAI doesn't reject on the promise for a failed transcription — a
-// failed job resolves with a normal Transcript that has `.error` set (and
-// `.status === "error"`), not a rejection — so success/failure is read off
-// the response, not just a try/catch.
-//
-// Degrades to a no-op if `assemblyai` isn't installed and never throws into
-// the caller.
-
 export function patchAssemblyAI(client: EvalKitClient, TranscriptService: any): void {
   if (typeof TranscriptService?.prototype?.transcribe !== "function" || TranscriptService.prototype.transcribe.__evalkit) return;
   const original = TranscriptService.prototype.transcribe;

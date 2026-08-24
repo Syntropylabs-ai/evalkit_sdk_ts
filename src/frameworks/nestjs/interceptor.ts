@@ -23,7 +23,6 @@ export class EvalKitInterceptor {
       requestBody: req.body,
     });
 
-    // Capture response body — accumulate chunks from write() + end() up to the configured limit.
     const BODY_MAX = this.client.options.maxBodyBytes;
     const bodyChunks: Buffer[] = [];
     let bodyLen = 0;
@@ -36,7 +35,7 @@ export class EvalKitInterceptor {
             ? Buffer.from(chunk)
             : null;
         if (b?.length) { bodyChunks.push(b); bodyLen += b.length; }
-      } catch { /* never affect the response */ }
+      } catch {  }
     };
     if (res && typeof res.write === 'function') {
       const origWrite = res.write.bind(res);
@@ -69,7 +68,7 @@ export class EvalKitInterceptor {
             if (bodyChunks.length) {
               try {
                 responseBody = Buffer.concat(bodyChunks).subarray(0, BODY_MAX).toString('utf-8');
-              } catch { /* ignore */ }
+              } catch {  }
             }
             end(sc >= 400 ? 'ERROR' : 'OK', { statusCode: sc, body: responseBody });
             observer.complete?.();

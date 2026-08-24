@@ -1,24 +1,13 @@
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody, startVectorDb } from "./_common.js";
 
-// Patch @pinecone-database/pinecone's Index.query/upsert at the class level.
-//
-// RAG pipelines retrieve context from a vector DB before generating a response —
-// without this, that lookup is invisible (only the downstream LLM call gets
-// traced), making it impossible to tell whether a bad answer came from retrieval
-// (wrong/no matches) or generation (bad prompt, bad model). Never captures raw
-// embedding vectors — they're large and not useful for a trace.
-//
-// Degrades to a no-op if @pinecone-database/pinecone isn't installed and never
-// throws into the caller.
-
 function matchesSummary(response: any): Array<{ id: any; score: any }> {
   const out: Array<{ id: any; score: any }> = [];
   try {
     for (const m of response?.matches ?? []) {
       out.push({ id: m?.id, score: m?.score });
     }
-  } catch { /* ignore */ }
+  } catch {  }
   return out;
 }
 

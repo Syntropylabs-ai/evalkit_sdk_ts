@@ -1,21 +1,7 @@
 import type { EvalKitClient } from '../../../core/client.js';
 
-// OpenAI Realtime runs over a WebSocket and is event-emitter based, so nothing
-// auto-instruments it. We attach listeners to an already-created realtime
-// connection: open a `voice.session` trace, emit one `voice.turn` span per model
-// turn (prompt/completion/tokens/request+response body) on `response.done`, a
-// `tool_call` span per function call, and close the session when the socket
-// closes/errors. Mirrors google-live.ts.
-//
-// The realtime API shape varies by `openai` version, so everything here is
-// best-effort: typeof checks, optional chaining, try/catch around every callback
-// body and around attachment itself. On any failure we return the original `rt`
-// untouched — tracing must NEVER throw into the host audio stream.
-
 const CAP = 8192;
 
-// Pull a transcript/text delta off a realtime event, tolerating shape drift
-// (top-level `.delta`, or nested `.delta.text` / `.delta.transcript`).
 function extractDelta(ev: any): string {
   const d = ev?.delta;
   if (typeof d === 'string') return d;
@@ -36,10 +22,6 @@ function safeJson(value: unknown, limit = 2 * 1024 * 1024): string | undefined {
   }
 }
 
-// Wires up one instrumented realtime session: shared by the explicit
-// `traceOpenAIRealtime` drop-in, the constructor-patch auto path, and the
-// `.on`-patch auto path (`attachWith`), each of which just supplies its own
-// `on(event, cb)` binder.
 function wireSession(
   client: EvalKitClient,
   rt: any,
@@ -55,7 +37,7 @@ function wireSession(
   const endSession = () => {
     if (ended) return;
     ended = true;
-    try { session.end('OK'); } catch { /* ignore */ }
+    try { session.end('OK'); } catch {  }
   };
 
   const resetTurn = () => {
@@ -64,23 +46,20 @@ function wireSession(
     turnStart = Date.now();
   };
 
-  // User's spoken input, transcribed server-side — the "prompt" half of the turn.
   on('conversation.item.input_audio_transcription.completed', (ev: any) => {
     try {
       const transcript = ev?.transcript;
       if (typeof transcript === 'string' && transcript) inputParts.push(transcript);
-    } catch { /* never break the stream */ }
+    } catch {  }
   });
 
-  // Streaming transcript / text deltas accumulate into the current turn.
   const onDelta = (ev: any) => {
-    try { completionBuf += extractDelta(ev); } catch { /* never break the stream */ }
+    try { completionBuf += extractDelta(ev); } catch {  }
   };
   on('response.audio_transcript.delta', onDelta);
   on('response.text.delta', onDelta);
   on('response.output_text.delta', onDelta);
 
-  // A completed model turn → one voice.turn llm_call span.
   on('response.done', (ev: any) => {
     try {
       const prompt = inputParts.join('\n').trim();
@@ -88,7 +67,7 @@ function wireSession(
       const ms = Date.now() - turnStart;
       const response = ev?.response;
       resetTurn();
-      if (!prompt && !completion) return; // skip audio-only turns with no transcript at all
+      if (!prompt && !completion) return;
 
       const usage = response?.usage;
       const tokensIn = usage?.input_tokens ?? 0;
@@ -112,10 +91,9 @@ function wireSession(
         'llm.turn_ms': ms,
       }, session.ctx);
       end('OK');
-    } catch { /* never break the stream */ }
+    } catch {  }
   });
 
-  // Each function call → one tool_call span. Arguments arrive as a JSON string.
   on('response.function_call_arguments.done', (ev: any) => {
     try {
       const name = ev?.name ?? ev?.function?.name;
@@ -130,7 +108,7 @@ function wireSession(
         'tool.name': String(name),
       }, session.ctx);
       end('OK');
-    } catch { /* never break the stream */ }
+    } catch {  }
   });
 
   on('close', endSession);
@@ -146,7 +124,7 @@ function attachRealtimeListeners(
 ): any {
   try {
     if (!rt || typeof rt.on !== 'function') return rt;
-    // Idempotency — never double-instrument the same connection.
+
     if ((rt as { __evalkit?: boolean }).__evalkit) return rt;
 
     const model = String(
@@ -159,21 +137,18 @@ function attachRealtimeListeners(
       ...(opts.userId ? { 'evalkit.user_id': opts.userId } : {}),
     };
     const on = (event: string, cb: (...a: any[]) => void) => {
-      try { rt.on(event, cb); } catch { /* never break the host */ }
+      try { rt.on(event, cb); } catch {  }
     };
     wireSession(client, rt, on, base);
 
     (rt as { __evalkit?: boolean }).__evalkit = true;
     return rt;
   } catch {
-    // Attachment failed — return the connection untouched, fail open.
+
     return rt;
   }
 }
 
-// Explicit drop-in: attach tracing to an already-created realtime connection.
-//   const rt = new OpenAIRealtimeWebSocket({ model });
-//   traceOpenAIRealtime(client, rt);
 export function traceOpenAIRealtime(
   client: EvalKitClient,
   rt: any,
@@ -182,9 +157,6 @@ export function traceOpenAIRealtime(
   return attachRealtimeListeners(client, rt, opts);
 }
 
-// Auto path: patch the realtime class so any new connection is auto-traced.
-// We wrap the constructor to attach listeners on the freshly built instance.
-// Best-effort — if no realtime class is resolvable, this is a no-op.
 export function patchOpenAIRealtime(client: EvalKitClient, RealtimeClass: any): void {
   try {
     if (typeof RealtimeClass !== 'function') return;
@@ -192,9 +164,6 @@ export function patchOpenAIRealtime(client: EvalKitClient, RealtimeClass: any): 
     const proto = RealtimeClass.prototype;
     if (!proto) return;
 
-    // OpenAI's realtime emitter exposes `on`; patch it so the first listener
-    // registration triggers our attachment, without subclassing the constructor
-    // (which would require re-exporting). We hook `on` once per instance.
     const origOn = typeof proto.on === 'function' ? proto.on : null;
     if (!origOn) return;
     if ((proto.on as { __evalkit?: boolean }).__evalkit) return;
@@ -202,21 +171,18 @@ export function patchOpenAIRealtime(client: EvalKitClient, RealtimeClass: any): 
     proto.on = function (this: any, ...args: any[]): any {
       try {
         if (!(this as { __evalkit?: boolean }).__evalkit) {
-          // Mark first so wireSession (which also calls .on) doesn't recurse,
-          // then attach our listeners via the original `on`.
+
           (this as { __evalkit?: boolean }).__evalkit = true;
           attachWith(client, this, origOn);
         }
-      } catch { /* never break the host */ }
+      } catch {  }
       return origOn.apply(this, args);
     };
     (proto.on as { __evalkit?: boolean }).__evalkit = true;
     (RealtimeClass as { __evalkit?: boolean }).__evalkit = true;
-  } catch { /* fail open — never throw into the host */ }
+  } catch {  }
 }
 
-// Like attachRealtimeListeners but uses a captured original `on` (the instance's
-// `on` may already be our patched wrapper). Idempotency is handled by the caller.
 function attachWith(client: EvalKitClient, rt: any, origOn: (...a: any[]) => any): void {
   try {
     const model = String(rt?.model ?? rt?.session?.model ?? 'gpt-realtime');
@@ -225,8 +191,8 @@ function attachWith(client: EvalKitClient, rt: any, origOn: (...a: any[]) => any
       'gen_ai.request.model': model,
     };
     const on = (event: string, cb: (...a: any[]) => void) => {
-      try { origOn.call(rt, event, cb); } catch { /* ignore */ }
+      try { origOn.call(rt, event, cb); } catch {  }
     };
     wireSession(client, rt, on, base);
-  } catch { /* fail open */ }
+  } catch {  }
 }

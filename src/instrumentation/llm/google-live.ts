@@ -1,14 +1,5 @@
 import type { EvalKitClient } from '../../core/client.js';
 
-// Gemini Live runs over a WebSocket, which nothing auto-instruments. We wrap the
-// connect params (for inbound messages) and the returned Session (for outbound
-// sendClientContent/sendRealtimeInput/sendToolResponse calls): open a
-// `voice.session` trace, emit one `voice.turn` span per model turn with
-// prompt/completion/tokens/request+response body — the same shape every other
-// auto-instrumented provider produces — and a `tool_call` span per function
-// call. Closes the session when the socket closes.
-// Shared by both the auto patch (patchGoogleLive) and the explicit helper (traceLive).
-
 const MAX_TEXT = 8192;
 
 function safeJson(value: unknown, limit = 2 * 1024 * 1024): string | undefined {
@@ -21,8 +12,6 @@ function safeJson(value: unknown, limit = 2 * 1024 * 1024): string | undefined {
   }
 }
 
-// Pull readable text out of a `turns` (ContentListUnion) argument to
-// sendClientContent — a string, a Content, or an array of either.
 function extractTurnsText(turns: unknown): string {
   const parts: string[] = [];
   const fromContent = (c: any) => {
@@ -45,7 +34,7 @@ function modalityTokens(details: any, modality: string): number {
     for (const m of details ?? []) {
       if (m?.modality === modality) total += m?.tokenCount ?? 0;
     }
-  } catch { /* ignore */ }
+  } catch {  }
   return total;
 }
 
@@ -105,7 +94,7 @@ function wireSession(
         }, session.ctx);
         end('OK');
       }
-    } catch { /* never break the stream */ }
+    } catch {  }
   };
 
   const endTurn = (): void => {
@@ -115,7 +104,7 @@ function wireSession(
     const ms = Date.now() - turn.turnStart;
     const { requestDump, responseDump, usage } = turn;
     turn.reset();
-    if (!prompt && !completion) return; // skip audio-only turns with no transcript
+    if (!prompt && !completion) return;
 
     const reqBody = requestDump.length ? safeJson(requestDump) : undefined;
     const respBody = responseDump.length ? safeJson(responseDump) : undefined;
@@ -182,7 +171,7 @@ function wireSession(
 
       emitToolCalls(msg);
       if (sc?.turnComplete) endTurn();
-    } catch { /* never break the audio stream */ }
+    } catch {  }
   };
 
   const onSendClientContent = (params: any): void => {
@@ -190,7 +179,7 @@ function wireSession(
       const text = extractTurnsText(params?.turns);
       if (text) turn.inputParts.push(text);
       turn.requestDump.push({ type: 'client_content', turnComplete: params?.turnComplete, turns: params?.turns });
-    } catch { /* never break the stream */ }
+    } catch {  }
   };
 
   const onSendRealtimeInput = (params: any): void => {
@@ -202,20 +191,18 @@ function wireSession(
         const modality = ['audio', 'video', 'activityStart', 'activityEnd'].find((k) => params[k] !== undefined);
         if (modality) turn.requestDump.push({ type: 'realtime_input', modality });
       }
-    } catch { /* never break the stream */ }
+    } catch {  }
   };
 
   const onSendToolResponse = (params: any): void => {
     try {
       turn.requestDump.push({ type: 'tool_response', functionResponses: params?.functionResponses });
-    } catch { /* never break the stream */ }
+    } catch {  }
   };
 
   return { ctx: session.ctx, end: session.end, onMessage, onSendClientContent, onSendRealtimeInput, onSendToolResponse };
 }
 
-// Instruments the Session object `connect()` resolves to: wraps the three send
-// methods to capture outbound content, and `close` to end the session span.
 function instrumentSession(session: any, wiring: ReturnType<typeof wireSession>, closed: () => void): any {
   if (!session || typeof session !== 'object') return session;
   try {
@@ -242,7 +229,7 @@ function instrumentSession(session: any, wiring: ReturnType<typeof wireSession>,
     }
     const origClose = typeof session.close === 'function' ? session.close.bind(session) : null;
     if (origClose) session.close = (...a: any[]) => { closed(); return origClose(...a); };
-  } catch { /* never break the host */ }
+  } catch {  }
   return session;
 }
 
@@ -271,12 +258,11 @@ function wrapConnectParams(
   };
 
   let ended = false;
-  const closed = () => { if (ended) return; ended = true; try { wiring.end('OK'); } catch { /* ignore */ } };
+  const closed = () => { if (ended) return; ended = true; try { wiring.end('OK'); } catch {  } };
 
   return { params: wrapped, attach: (session: any) => instrumentSession(session, wiring, closed) };
 }
 
-// Explicit drop-in for `ai.live.connect(params)`.
 export async function traceLive(
   client: EvalKitClient,
   ai: any,
@@ -287,7 +273,6 @@ export async function traceLive(
   return attach(await ai.live.connect(wrapped));
 }
 
-// Auto path: patch Live.prototype.connect so plain `ai.live.connect(...)` is traced.
 export function patchGoogleLive(client: EvalKitClient, LiveClass: any): void {
   const proto = LiveClass?.prototype;
   if (!proto || typeof proto.connect !== 'function') return;

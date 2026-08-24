@@ -26,7 +26,7 @@ function emitErrorSpan(client: EvalKitClient, eventName: string, error: Error): 
       span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
       span.end();
     }
-  } catch { /* tracing must never throw, least of all from an error handler */ }
+  } catch {  }
 }
 
 export function patchErrors(client: EvalKitClient): void {
@@ -39,8 +39,6 @@ export function patchErrors(client: EvalKitClient): void {
     emitErrorSpan(client, 'error.unhandled_rejection', reason instanceof Error ? reason : new Error(String(reason)));
   });
 
-  // prependListener so we record before the host's handlers; if EvalKit is the ONLY
-  // listener the host expected a crash, so re-exit to preserve default behavior.
   process.prependListener('uncaughtException', (err: Error) => {
     emitErrorSpan(client, 'error.uncaught_exception', err instanceof Error ? err : new Error(String(err)));
     if (process.listenerCount('uncaughtException') === 1) {

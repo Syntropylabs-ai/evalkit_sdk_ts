@@ -1,10 +1,6 @@
 import { ROOT_CONTEXT, trace, context as otelContext } from "@opentelemetry/api";
 import type { Context as OtelContext } from "@opentelemetry/api";
 
-/**
- * Parse a W3C traceparent header into an OTel parent context.
- * Returns the current active context if the header is absent or malformed.
- */
 export function extractTraceparent(header: string | undefined): OtelContext {
   if (!header) return otelContext.active();
   const parts = header.split('-');

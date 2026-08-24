@@ -2,7 +2,7 @@ import { trace, context as otelContext, SpanKind, SpanStatusCode } from '@opente
 import type { EvalKitClient } from '../../core/client.js';
 
 export function patchRedis(client: EvalKitClient, redisInstance: any): void {
-  // Accept either a client INSTANCE (manual use) or a class/prototype (auto, e.g. ioredis).
+
   const protoHasCmd =
     redisInstance?.prototype &&
     (typeof redisInstance.prototype.sendCommand === 'function' || typeof redisInstance.prototype.call === 'function');

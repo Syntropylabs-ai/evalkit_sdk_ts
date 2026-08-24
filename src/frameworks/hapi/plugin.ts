@@ -6,17 +6,6 @@ export interface HapiPluginOptions {
   name?: string | ((request: any) => string);
 }
 
-/**
- * Hapi lifecycle plugin that auto-traces every incoming request.
- *
- * @example
- * import Hapi from '@hapi/hapi';
- * import evalkit from 'syntropylabs-evalkit';
- *
- * evalkit.init({ subscriptionKey: '...', serviceName: 'my-api' });
- * const server = Hapi.server({ port: 3000 });
- * await server.register(evalkit.hapiPlugin());
- */
 export function createHapiPlugin(
   client: EvalKitClient,
   options?: HapiPluginOptions,
@@ -24,7 +13,7 @@ export function createHapiPlugin(
   return {
     name: '@evalkit/hapi',
     register(server: any) {
-      // Map to store per-request end callbacks
+
       const requestEndMap = new WeakMap<object, {
         end: (...args: any[]) => void;
         ctx: any;
@@ -63,7 +52,7 @@ export function createHapiPlugin(
             if (src !== undefined && src !== null) {
               responseBody = (typeof src === 'string' ? src : JSON.stringify(src)).slice(0, client.options.maxBodyBytes);
             }
-          } catch { /* ignore */ }
+          } catch {  }
           entry.end(sc >= 400 ? 'ERROR' : 'OK', { statusCode: sc, body: responseBody });
           requestEndMap.delete(request);
         }

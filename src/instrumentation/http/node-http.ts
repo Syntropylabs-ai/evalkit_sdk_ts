@@ -49,8 +49,7 @@ function extractUrlMethod(
 }
 
 export function patchHttp(client: EvalKitClient): void {
-  // ESM namespace objects are sealed — use createRequire to get the mutable CJS module
-  // object that Axios/node-fetch/etc. actually call into.
+
   let httpMod: typeof http;
   let httpsMod: typeof https;
   try {
@@ -96,7 +95,6 @@ export function patchHttp(client: EvalKitClient): void {
         ...(options?.headers as Record<string, string | string[] | undefined> ?? {}),
       };
 
-      // If Axios already traced this request, merge headers into its span and skip
       const axiosSpanId = reqHeaders['x-evalkit-span-id'];
       if (axiosSpanId) {
         if (typeof input === 'object' && !(input instanceof URL) && (input as any).headers) {
@@ -163,10 +161,6 @@ export function patchHttp(client: EvalKitClient): void {
   }
 }
 
-// patchIncomingHttp patches http.Server.prototype.emit so every inbound
-// 'request' event runs inside an OTel context. This is framework-agnostic:
-// Express, NestJS, Fastify (in HTTP/1 mode), Koa, etc. all use http.Server
-// internally — no manual middleware registration required.
 export function patchIncomingHttp(client: EvalKitClient): void {
   let httpMod: typeof http;
   try {
@@ -189,17 +183,14 @@ export function patchIncomingHttp(client: EvalKitClient): void {
     const res = args[1] as http.ServerResponse;
     const url = req.url ?? '/';
 
-    // Skip health checks, ingest self-calls, etc.
     if (shouldSkip(url)) return origEmit.call(this, event, ...args);
 
-    // If a framework middleware already started a span, don't double-wrap
     if (trace.getActiveSpan()?.isRecording()) return origEmit.call(this, event, ...args);
 
     const method = (req.method ?? 'GET').toUpperCase();
     let pathname = url;
     try { pathname = new URL(url, 'http://localhost').pathname; } catch { }
 
-    // Propagate W3C traceparent from upstream if present
     const traceparentHeader = (req.headers as Record<string, string | string[] | undefined>)['traceparent'];
     const parentCtx = traceparentHeader
       ? buildParentCtx(Array.isArray(traceparentHeader) ? traceparentHeader[0] : traceparentHeader)
@@ -225,16 +216,6 @@ export function patchIncomingHttp(client: EvalKitClient): void {
     res.setHeader('x-trace-id', spanCtx.traceId);
     res.setHeader('traceparent', `00-${spanCtx.traceId}-${spanCtx.spanId}-01`);
 
-    // Capture the request body by listening to 'data' events on the IncomingMessage stream.
-    //
-    // IMPORTANT: attaching a 'data' listener switches the stream into FLOWING mode. For
-    // multipart/form-data uploads the framework parser (multer/busboy) attaches its listener
-    // ASYNCHRONOUSLY — after guards/interceptors resolve — by which point the streamed file
-    // bytes have already drained. The parser then sees a truncated stream and throws
-    // "Multipart: Unexpected end of form", 400-ing every file upload (dataset CSV, media,
-    // blog image, voice dataset). So we skip request-body capture for multipart and leave the
-    // upload stream paused for the real parser. (JSON/urlencoded parsers attach synchronously
-    // on the same tick, so they still receive every chunk and are unaffected.)
     const BODY_MAX = client.options.maxBodyBytes;
     const reqContentType = String(
       (req.headers as Record<string, string | string[] | undefined>)['content-type'] ?? '',
@@ -249,19 +230,17 @@ export function patchIncomingHttp(client: EvalKitClient): void {
             const b = Buffer.isBuffer(chunk) ? chunk : typeof chunk === 'string' ? Buffer.from(chunk) : null;
             if (b && b.length) { reqBodyChunks.push(b); reqBodyLen += b.length; }
           }
-        } catch { /* never affect the request */ }
+        } catch {  }
       });
       req.on('end', () => {
         if (!reqBodyChunks.length) return;
         try {
           const raw = Buffer.concat(reqBodyChunks).subarray(0, BODY_MAX).toString('utf-8');
           if (raw) span.setAttribute('http.request.body', raw);
-        } catch { /* ignore */ }
+        } catch {  }
       });
     }
 
-    // Capture the response body, bounded and pass-through: we only observe a copy of
-    // what is written and always forward the original args, so streaming is never altered.
     const bodyChunks: Buffer[] = [];
     let bodyLen = 0;
     const captureChunk = (chunk: unknown) => {
@@ -274,7 +253,7 @@ export function patchIncomingHttp(client: EvalKitClient): void {
               : null;
           if (b && b.length) { bodyChunks.push(b); bodyLen += b.length; }
         }
-      } catch { /* never let body capture affect the response */ }
+      } catch {  }
     };
     const origWrite = res.write.bind(res);
     const origEnd = res.end.bind(res);
@@ -288,12 +267,12 @@ export function patchIncomingHttp(client: EvalKitClient): void {
         if (respHeaders && Object.keys(respHeaders).length) {
           span.setAttribute('http.response.headers', JSON.stringify(sanitizeHeaders(respHeaders as any)));
         }
-      } catch { /* getHeaders may not be available in all environments */ }
+      } catch {  }
       if (bodyChunks.length) {
         try {
           const raw = Buffer.concat(bodyChunks).subarray(0, BODY_MAX).toString('utf-8');
           if (raw) span.setAttribute('http.response.body', raw);
-        } catch { /* ignore */ }
+        } catch {  }
       }
       span.setStatus({ code: res.statusCode >= 400 ? SpanStatusCode.ERROR : SpanStatusCode.OK });
       span.end();
@@ -305,7 +284,6 @@ export function patchIncomingHttp(client: EvalKitClient): void {
       span.end();
     });
 
-    // Run the entire request pipeline (Express router, NestJS, etc.) inside ctx
     return otelContext.with(ctx, () => origEmit.call(this, event, ...args));
   }
 

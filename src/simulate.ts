@@ -50,21 +50,21 @@ export interface SimulateUserOptions {
 }
 
 export interface EvaluateSimulationOptions {
-  /** The simulationId returned by simulateUser. */
+
   simulationId: string;
-  /** Mongo id of the evaluator collection whose rules to run. */
+
   collectionId: string;
-  /** Judge provider, e.g. "openai", "anthropic", "google". */
+
   provider: string;
-  /** Judge model id, e.g. "gpt-4o". */
+
   model: string;
-  /** BYOK judge key — used for the judge call only, never stored. */
+
   apiKey: string;
-  /** A specific run of the simulation. Defaults to the most recent run. */
+
   runId?: string;
-  /** Judge output token cap (defaults to the backend's value). */
+
   maxTokens?: number;
-  /** Override the control-plane URL (default: the value from init). */
+
   apiUrl?: string;
 }
 
@@ -81,11 +81,11 @@ export interface SimEvalScenario {
   scenarioId: string;
   name: string;
   traceId: string;
-  status: string; // "OK" | "ERROR" | "skipped"
+  status: string;
   overallScore: number;
   passed: boolean;
   metrics: SimEvalMetric[];
-  error?: string; // only set when status === "skipped"
+  error?: string;
 }
 
 export interface EvaluateSimulationResult {
@@ -110,8 +110,6 @@ function jsonableTool(t: any): unknown {
   return String(t);
 }
 
-/** These control-plane calls use global fetch (Node 18+). Fail with a clear
- *  message rather than a cryptic "fetch is not a function" on older runtimes. */
 function _requireFetch(): void {
   if (typeof fetch === "undefined") {
     throw new Error("[evalkit] global fetch is required (Node 18+). Upgrade Node or install a fetch polyfill.");
@@ -229,8 +227,7 @@ async function runScenario(
         }
         count++;
       }
-      // Prefer tools the agent explicitly returned; otherwise use the tool calls
-      // captured from the LLM spans emitted during this scenario's trace.
+
       const toolCalls = explicitTools.length ? explicitTools : (simToolCallsByTraceId.get(traceId) ?? []);
       scores = scoreScenario(scenario, texts.join("\n"), toolCalls, opts.metrics);
     });
@@ -271,11 +268,6 @@ export async function simulateUser(
   return { simulationId, runId, results };
 }
 
-/**
- * Evaluate a completed scenario-simulation run against an evaluator collection.
- * Runs the collection's rules over every scenario of the run (server-side) and
- * returns per-scenario, per-criterion scores + reasons. The judge is BYOK.
- */
 export async function evaluateSimulation(
   client: EvalKitClient,
   opts: EvaluateSimulationOptions,
@@ -299,7 +291,7 @@ export async function evaluateSimulation(
       "X-Subscription-Key": client.options.subscriptionKey,
     },
     body: JSON.stringify(body),
-    // Evaluating many scenarios can take minutes; give the judge room.
+
     signal: AbortSignal.timeout(300_000),
   });
   if (!res.ok) {

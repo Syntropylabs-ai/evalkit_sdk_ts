@@ -6,11 +6,6 @@ import { emitToolCalls, fromLangChainResult } from "../_toolcalls.js";
 import { safeBody } from "../_body.js";
 import { dynImport, getRequire } from "../../../utils/dynimport.js";
 
-// @langchain/core ships both a CJS and an ESM build, so a synchronous
-// require() resolves it immediately — tried first so the global patch below
-// is installed before init() returns, not sometime later on a microtask.
-// Falls back to a dynamic import for ESM-only setups where require()
-// isn't available at all.
 function loadLangChainModule(specifier: string): any {
   try {
     return getRequire()(specifier);
@@ -18,36 +13,6 @@ function loadLangChainModule(specifier: string): any {
     return undefined;
   }
 }
-
-// LangChain / LangGraph instrumentation for the TS SDK.
-//
-// LangGraph (JS) is built on LangChain Core, so a single set of callback methods
-// captures every chain/node, LLM, chat model, tool and retriever run. We build the
-// span tree from LangChain's own runId / parentRunId graph and nest it under any
-// active evalkit (OTel) trace.
-//
-// `patchLangChain` best-effort registers the handler GLOBALLY by patching
-// CallbackManager._configureSync, so `init()` covers LangGraph with no user
-// code. Two things were tried and ruled out first, both verified live against
-// a real @langchain/core@1.2.3 LangGraph agent run:
-//   - Wrapping the public `CallbackManager.configure`: never called — a real
-//     agent run calls the private `_configureSync` directly, dozens of times,
-//     and `configure` itself is just a thin (and in this version, unused)
-//     wrapper around it.
-//   - @langchain/core/context's own `registerConfigureHook` +
-//     `setContextVariable` (its documented public mechanism for exactly this):
-//     backed by AsyncLocalStorage, so the value only survives within the same
-//     async call chain it was set in — it's for "temporarily attach a handler
-//     for the duration of this run", not "register once at init() for the
-//     life of the process". Crossing even one `await` (which init()'s own
-//     dynamic import unavoidably does before user code ever runs) drops it
-//     silently, so zero spans were ever emitted through it in practice.
-// `_configureSync` is private/underscore-prefixed, but it's a plain
-// synchronous class-method mutation — unaffected by async-context scoping,
-// and the same technique OpenLIT and OpenLLMetry/Traceloop use for this exact
-// package. `langchainCallbackHandler()` is also exported for the explicit
-// `{ callbacks: [handler] }` path. Both never throw and are no-ops when
-// LangChain isn't installed.
 
 const ATTR_MAX = 4096;
 
@@ -125,7 +90,7 @@ function llmResultTokens(output: any): { tin: number; tout: number } {
         }
       }
     }
-  } catch { /* ignore */ }
+  } catch {  }
   return { tin: tin || 0, tout: tout || 0 };
 }
 
@@ -148,7 +113,7 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
         parentCtx,
       );
       runs.set(runId, { span, ctx: trace.setSpan(parentCtx, span) });
-    } catch { /* never break the graph */ }
+    } catch {  }
   }
 
   function endRun(runId: string, status: "OK" | "ERROR", attrs?: Record<string, string | number | boolean>, message?: string): void {
@@ -159,7 +124,7 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
       if (attrs) rec.span.setAttributes(attrs);
       rec.span.setStatus({ code: status === "OK" ? SpanStatusCode.OK : SpanStatusCode.ERROR, message });
       rec.span.end();
-    } catch { /* ignore */ }
+    } catch {  }
   }
 
   return {
@@ -193,10 +158,10 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
     handleLLMEnd(output: any, runId: string) {
       const { tin, tout } = llmResultTokens(output);
       const rec = runs.get(runId);
-      // Tool calls -> event on the LLM span + child tool_call span + sim record (one path).
+
       try {
         if (rec) emitToolCalls(client, rec.span, fromLangChainResult(output));
-      } catch { /* ignore */ }
+      } catch {  }
       const respBody = safeBody(output);
       endRun(runId, "OK", {
         "evalkit.completion": llmResultCompletion(output),
@@ -229,10 +194,6 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
   };
 }
 
-/**
- * Build a LangChain BaseCallbackHandler bound to the SDK client, for the explicit
- * `{ callbacks: [handler] }` path. Returns null if LangChain isn't installed.
- */
 export async function langchainCallbackHandler(client: EvalKitClient): Promise<any | null> {
   try {
     const base: any = loadLangChainModule("@langchain/core/callbacks/base") ?? await dynImport("@langchain/core/callbacks/base");
@@ -245,7 +206,6 @@ export async function langchainCallbackHandler(client: EvalKitClient): Promise<a
   }
 }
 
-/** Best-effort global registration: every LangChain/LangGraph run is traced. */
 export async function patchLangChain(client: EvalKitClient): Promise<any | null> {
   const handler = await langchainCallbackHandler(client);
   if (!handler) return null;
@@ -267,11 +227,11 @@ export async function patchLangChain(client: EvalKitClient): Promise<any | null>
               inheritableHandlers.addHandler(handler, true);
             }
           }
-        } catch { /* never break LangChain — fall through to the original call */ }
+        } catch {  }
         return original.call(this, inheritableHandlers, ...rest);
       };
       (CM as any).__evalkitPatched = true;
     }
-  } catch { /* manual handler still usable */ }
+  } catch {  }
   return handler;
 }

@@ -1,18 +1,3 @@
-/**
- * Single source of truth for tool-call extraction across every LLM provider.
- *
- * Previously each provider (openai/anthropic/google-genai/langchain) re-implemented
- * the same three steps — addEvent on the LLM span, a child tool_call span, and a
- * recordSimToolCall — and they drifted (google-genai's child span had no attributes,
- * langchain created no child span at all). This module normalizes the provider
- * response into NormalizedToolCall[] and emits all three steps consistently.
- *
- * The child tool_call span carries BOTH the gen_ai.tool.* keys and the tool.* keys
- * so it renders identically to the Python SDK's promoted tool_call spans.
- *
- * Nothing here may throw into the host app: every extractor swallows errors and
- * degrades to [].
- */
 import { SpanKind, context as otelContext, trace } from "@opentelemetry/api";
 import type { Span } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../core/client.js";
@@ -49,7 +34,6 @@ function safeParse(argsJson: string): Record<string, unknown> | undefined {
   }
 }
 
-// ── Shape 1: OpenAI Chat Completions ─────────────────────────────────────────
 export function fromOpenAIChat(result: any, _ts?: string): NormalizedToolCall[] {
   const out: NormalizedToolCall[] = [];
   try {
@@ -60,11 +44,10 @@ export function fromOpenAIChat(result: any, _ts?: string): NormalizedToolCall[] 
         out.push({ name, argsJson: truncate(toJson(tc?.function?.arguments ?? "")), id: tc?.id ?? "" });
       }
     }
-  } catch { /* never throw */ }
+  } catch {  }
   return out;
 }
 
-// ── Shape 2: Anthropic content blocks ────────────────────────────────────────
 export function fromAnthropicBlocks(blocks: any, _ts?: string): NormalizedToolCall[] {
   const out: NormalizedToolCall[] = [];
   try {
@@ -74,11 +57,10 @@ export function fromAnthropicBlocks(blocks: any, _ts?: string): NormalizedToolCa
       if (!name) continue;
       out.push({ name, argsJson: truncate(toJson(block?.input ?? {})), id: block?.id ?? "" });
     }
-  } catch { /* never throw */ }
+  } catch {  }
   return out;
 }
 
-// ── Shape 3: Google GenAI ────────────────────────────────────────────────────
 export function fromGoogleParts(resp: any, _ts?: string): NormalizedToolCall[] {
   const out: NormalizedToolCall[] = [];
   try {
@@ -98,11 +80,10 @@ export function fromGoogleParts(resp: any, _ts?: string): NormalizedToolCall[] {
       if (!name) continue;
       out.push({ name, argsJson: truncate(toJson(fc?.args ?? {})), id: fc?.id ?? `call_${i++}` });
     }
-  } catch { /* never throw */ }
+  } catch {  }
   return out;
 }
 
-// ── Shape 4: OpenAI Responses API ────────────────────────────────────────────
 function responsesCitations(items: any[]): string {
   const citations: string[] = [];
   try {
@@ -117,7 +98,7 @@ function responsesCitations(items: any[]): string {
         }
       }
     }
-  } catch { /* never throw */ }
+  } catch {  }
   return citations.slice(0, 10).join("\n");
 }
 
@@ -142,11 +123,10 @@ export function fromOpenAIResponses(items: any, _ts?: string): NormalizedToolCal
         });
       }
     }
-  } catch { /* never throw */ }
+  } catch {  }
   return out;
 }
 
-// ── Shape 5: LangChain LLMResult ─────────────────────────────────────────────
 export function fromLangChainResult(output: any, _ts?: string): NormalizedToolCall[] {
   const out: NormalizedToolCall[] = [];
   try {
@@ -159,7 +139,7 @@ export function fromLangChainResult(output: any, _ts?: string): NormalizedToolCa
         }
       }
     }
-  } catch { /* never throw */ }
+  } catch {  }
   return out;
 }
 
@@ -175,8 +155,8 @@ export function emitToolCalls(client: EvalKitClient, llmSpan: Span, calls: Norma
       "gen_ai.tool.call.arguments": c.argsJson,
     };
     if (c.result != null) eventAttrs["gen_ai.tool.call.result"] = c.result;
-    try { llmSpan.addEvent("gen_ai.tool.call", eventAttrs); } catch { /* never break tracing */ }
-    try { recordSimToolCall(traceId, c.name, safeParse(c.argsJson)); } catch { /* never break tracing */ }
+    try { llmSpan.addEvent("gen_ai.tool.call", eventAttrs); } catch {  }
+    try { recordSimToolCall(traceId, c.name, safeParse(c.argsJson)); } catch {  }
     try {
       const toolSpan = client.tracer.startSpan(
         c.name,
@@ -193,6 +173,6 @@ export function emitToolCalls(client: EvalKitClient, llmSpan: Span, calls: Norma
         ctx,
       );
       toolSpan.end();
-    } catch { /* never break tracing */ }
+    } catch {  }
   }
 }

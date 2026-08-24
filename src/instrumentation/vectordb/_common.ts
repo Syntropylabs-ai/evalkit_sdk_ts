@@ -3,13 +3,6 @@ import type { EvalKitClient } from "../../core/client.js";
 
 export { safeBody } from "../llm/_body.js";
 
-// Shared helper for vector-DB instrumentation — builds a db_query span via a real
-// OTel span (mirrors instrumentation/db/mongoose.ts's attribute conventions), with
-// vector-specific attributes layered on by each provider's patch. Unlike the
-// existing mongoose/mysql2 patches, this does NOT require a pre-existing active
-// span: a standalone ingestion/retrieval script (no active HTTP trace) still gets
-// a root trace, matching the Python SDK's ambient-trace-id fallback behavior.
-
 export function startVectorDb(
   client: EvalKitClient,
   system: string,
@@ -41,6 +34,6 @@ export function startVectorDb(
         span.setStatus({ code: status === "OK" ? SpanStatusCode.OK : SpanStatusCode.ERROR });
       }
       span.end();
-    } catch { /* tracing must never break the query */ }
+    } catch {  }
   };
 }

@@ -2,7 +2,6 @@ import { SpanKind, SpanStatusCode, context as otelContext } from "@opentelemetry
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody } from "./_body.js";
 
-
 function startAudioSpan(client: EvalKitClient, operation: string, model: string, prompt: string, reqBody?: string) {
   const attrs: Record<string, any> = { "evalkit.span_type": "llm_call", "gen_ai.system": "openai" };
   if (prompt) attrs["evalkit.prompt"] = prompt;
@@ -21,7 +20,7 @@ function startAudioSpan(client: EvalKitClient, operation: string, model: string,
         span.setStatus({ code: status === "OK" ? SpanStatusCode.OK : SpanStatusCode.ERROR });
       }
       span.end();
-    } catch { /* tracing must never break the call */ }
+    } catch {  }
   };
 }
 
@@ -63,7 +62,7 @@ function extractTranscriptionUsage(response: any): { extra: Record<string, any>;
       if (audioTokens) extra["gen_ai.usage.audio_input_tokens"] = audioTokens;
     }
     if (typeof response?.duration === "number") extra["gen_ai.audio.duration_seconds"] = response.duration;
-  } catch { /* ignore */ }
+  } catch {  }
   return { extra, tokensIn, tokensOut };
 }
 
@@ -103,18 +102,15 @@ function patchTranscribe(client: EvalKitClient, Cls: any, operation: string): vo
   Cls.prototype.create = traced;
 }
 
-/** Pass the OpenAI class itself, e.g. `require("openai").default ?? require("openai").OpenAI`
- *  — Speech/Transcriptions/Translations are reachable as `OpenAI.Audio.Speech` etc.,
- *  the same nested-namespace-class pattern as `OpenAI.Chat.Completions`. */
 export function patchOpenAIAudio(client: EvalKitClient, OpenAIClass: any): void {
   const audio = OpenAIClass?.Audio;
   try {
     if (audio?.Speech) patchSpeech(client, audio.Speech);
-  } catch { /* ignore */ }
+  } catch {  }
   try {
     if (audio?.Transcriptions) patchTranscribe(client, audio.Transcriptions, "audio.transcription");
-  } catch { /* ignore */ }
+  } catch {  }
   try {
     if (audio?.Translations) patchTranscribe(client, audio.Translations, "audio.translation");
-  } catch { /* ignore */ }
+  } catch {  }
 }
