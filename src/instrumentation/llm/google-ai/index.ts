@@ -2,6 +2,8 @@ import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opente
 import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
 import { safeBody } from "../_body.js";
+import type { GoogleUsage, GoogleUsageMetadata } from "../_google-usage.js";
+import { EMPTY_GOOGLE_USAGE, extractGoogleUsage, googleUsageAttributes, mergeGoogleUsage } from "../_google-usage.js";
 
 type Part = { text?: string; inlineData?: unknown };
 type Content = { role?: string; parts: Part[] };
@@ -17,7 +19,7 @@ type Candidate = {
 type GenerateContentResult = {
   response?: {
     candidates?: Candidate[];
-    usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number; cachedContentTokenCount?: number };
+    usageMetadata?: GoogleUsageMetadata;
   };
 };
 type GoogleGenerativeModel = {
@@ -89,14 +91,10 @@ export function patchGoogleAI(
 
     span.setAttributes({
       'gen_ai.response.model': modelName,
-      'gen_ai.usage.input_tokens': resp?.usageMetadata?.promptTokenCount ?? 0,
-      'gen_ai.usage.output_tokens': resp?.usageMetadata?.candidatesTokenCount ?? 0,
-      'gen_ai.usage.total_tokens': resp?.usageMetadata?.totalTokenCount ?? 0,
+      ...googleUsageAttributes(extractGoogleUsage(resp?.usageMetadata)),
       'gen_ai.response.finish_reasons': firstCandidate?.finishReason ? [firstCandidate.finishReason] : [],
       'evalkit.completion': completionText,
     });
-    const cachedTokens = resp?.usageMetadata?.cachedContentTokenCount ?? 0;
-    if (cachedTokens) span.setAttribute('gen_ai.usage.cached_tokens', cachedTokens);
 
     const respBody = safeBody(result);
     if (respBody) span.setAttribute('gen_ai.response.body', respBody);

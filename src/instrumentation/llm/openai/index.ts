@@ -33,11 +33,27 @@ type CreateParams = {
   max_tokens?: number;
   top_p?: number;
   stream?: boolean;
+  stream_options?: { include_usage?: boolean } | null;
   tools?: unknown[];
 };
 type Completions = { create: (...args: unknown[]) => Promise<unknown> };
 
-function wrapOpenAIStream(stream: any, span: Span, startMs: number = Date.now()): any {
+let warnedMissingStreamUsage = false;
+
+function warnMissingStreamUsage(): void {
+  if (warnedMissingStreamUsage) return;
+  warnedMissingStreamUsage = true;
+  try {
+    console.warn(
+      '[evalkit] a streamed OpenAI chat completion ended without a usage chunk, so this span reports 0 input and ' +
+        '0 output tokens and every cost report prices the call at $0 - the OpenAI API only sends the final usage ' +
+        'chunk when the request sets stream_options: { include_usage: true }; add it to your ' +
+        'chat.completions.create({ ... }) call to get real token counts for streamed calls (warned once per process)'
+    );
+  } catch {  }
+}
+
+function wrapOpenAIStream(stream: any, span: Span, startMs: number = Date.now(), warnOnZeroUsage: boolean = false): any {
   let content = '';
   let tokensIn = 0;
   let tokensOut = 0;
@@ -49,21 +65,22 @@ function wrapOpenAIStream(stream: any, span: Span, startMs: number = Date.now())
   function finish(error?: Error) {
     if (finished) return;
     finished = true;
+    if (warnOnZeroUsage && !error && !tokensIn && !tokensOut) warnMissingStreamUsage();
+    span.setAttributes({
+      'evalkit.completion': content,
+      'gen_ai.usage.input_tokens': tokensIn,
+      'gen_ai.usage.output_tokens': tokensOut,
+      'gen_ai.streaming': true,
+      ...(reasoningTokens && { 'gen_ai.usage.reasoning_tokens': reasoningTokens }),
+      ...(cacheReadTokens > 0 && { 'gen_ai.usage.cache_read_tokens': cacheReadTokens }),
+      ...(!error && ttftMs !== undefined && { 'gen_ai.server.time_to_first_token_ms': ttftMs }),
+    });
+    const body = safeBody({ text: content });
+    if (body) span.setAttribute('gen_ai.response.body', body);
     if (error) {
       span.recordException(error);
       span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
     } else {
-      span.setAttributes({
-        'evalkit.completion': content,
-        'gen_ai.usage.input_tokens': tokensIn,
-        'gen_ai.usage.output_tokens': tokensOut,
-        'gen_ai.streaming': true,
-        ...(reasoningTokens && { 'gen_ai.usage.reasoning_tokens': reasoningTokens }),
-        ...(cacheReadTokens > 0 && { 'gen_ai.usage.cache_read_tokens': cacheReadTokens }),
-        ...(ttftMs !== undefined && { 'gen_ai.server.time_to_first_token_ms': ttftMs }),
-      });
-      const body = safeBody({ text: content });
-      if (body) span.setAttribute('gen_ai.response.body', body);
       span.setStatus({ code: SpanStatusCode.OK });
     }
     span.end();
@@ -155,6 +172,7 @@ export function patchOpenAI(
 
     if (params?.stream) {
       const streamStartMs = Date.now();
+      const warnOnZeroUsage = system === 'openai' && !params.stream_options?.include_usage;
       let stream: unknown;
       try {
         stream = await otelContext.with(spanCtx, () => original.apply(this, args));
@@ -165,7 +183,7 @@ export function patchOpenAI(
         span.end();
         throw err;
       }
-      return wrapOpenAIStream(stream, span, streamStartMs);
+      return wrapOpenAIStream(stream, span, streamStartMs, warnOnZeroUsage);
     }
 
     let result: ChatCompletion;

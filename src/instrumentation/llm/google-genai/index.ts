@@ -3,8 +3,10 @@ import type { Span, Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
 import { emitToolCalls, fromGoogleParts } from "../_toolcalls.js";
 import { safeBody } from "../_body.js";
+import type { GoogleUsage, GoogleUsageMetadata } from "../_google-usage.js";
+import { EMPTY_GOOGLE_USAGE, extractGoogleUsage, googleUsageAttributes, mergeGoogleUsage } from "../_google-usage.js";
 
-type Part = { text?: string; functionCall?: { name?: string; args?: Record<string, unknown>; id?: string } };
+type Part = { text?: string; thought?: boolean; functionCall?: { name?: string; args?: Record<string, unknown>; id?: string } };
 type Content = { role?: string; parts?: Part[] };
 type GenAIRequest = {
   model?: string;
@@ -16,7 +18,7 @@ type GenAIResponse = {
   text?: string;
   candidates?: Candidate[];
   functionCalls?: Array<{ name?: string; args?: Record<string, unknown>; id?: string }>;
-  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number; cachedContentTokenCount?: number };
+  usageMetadata?: GoogleUsageMetadata;
 };
 type ModelsProto = {
   generateContent?: (...args: unknown[]) => Promise<unknown>;
@@ -63,16 +65,24 @@ function buildPrompt(req: GenAIRequest): string {
   return [sys ? `system: ${sys}` : "", body].filter(Boolean).join("\n");
 }
 
-function completionFrom(resp: GenAIResponse): string {
-
+function splitCandidateText(resp: GenAIResponse): { completion: string; thinking: string } {
   const parts: string[] = [];
+  const thoughts: string[] = [];
+  let sawThought = false;
   for (const cand of resp?.candidates ?? []) {
     for (const p of cand.content?.parts ?? []) {
+      if (p.thought) {
+        sawThought = true;
+        if (p.text) thoughts.push(p.text);
+        continue;
+      }
       if (p.text) parts.push(p.text);
     }
   }
-  if (parts.length) return parts.join("");
-  return resp?.text ?? "";
+  const thinking = thoughts.join("");
+  if (parts.length) return { completion: parts.join(""), thinking };
+  if (sawThought) return { completion: "", thinking };
+  return { completion: resp?.text ?? "", thinking };
 }
 
 let _client: EvalKitClient | null = null;
@@ -117,16 +127,14 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
         span.end();
         throw err;
       }
+      const { completion, thinking } = splitCandidateText(result);
       span.setAttributes({
         "gen_ai.response.model": modelName,
-        "gen_ai.usage.input_tokens": result?.usageMetadata?.promptTokenCount ?? 0,
-        "gen_ai.usage.output_tokens": result?.usageMetadata?.candidatesTokenCount ?? 0,
-        "gen_ai.usage.total_tokens": result?.usageMetadata?.totalTokenCount ?? 0,
-        "evalkit.completion": completionFrom(result),
+        ...googleUsageAttributes(extractGoogleUsage(result?.usageMetadata)),
+        "evalkit.completion": completion,
+        ...(thinking && { "gen_ai.response.thinking": thinking }),
       });
 
-      const cachedTokens = result?.usageMetadata?.cachedContentTokenCount ?? 0;
-      if (cachedTokens) span.setAttribute("gen_ai.usage.cached_tokens", cachedTokens);
       const respBody = safeBody(result);
       if (respBody) span.setAttribute("gen_ai.response.body", respBody);
       try { recordToolCalls(result, span, span.spanContext().traceId); } catch {  }
@@ -142,6 +150,7 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
     ModelsProto.generateContentStream = async function (this: unknown, ...args: unknown[]): Promise<unknown> {
       const req = (args[0] ?? {}) as GenAIRequest;
       const modelName = req.model ?? "unknown";
+      const startMs = Date.now();
       const ctx = parentCtx ?? otelContext.active();
       const span = client.tracer.startSpan(
         "generateContentStream",
@@ -173,39 +182,51 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
 
       async function* traced(): AsyncGenerator<GenAIResponse> {
         const parts: string[] = [];
-        let tin = 0;
-        let tout = 0;
-        let tcached = 0;
+        const thoughtParts: string[] = [];
+        let usage: GoogleUsage = EMPTY_GOOGLE_USAGE;
+        let ttftMs: number | undefined;
+        let failure: Error | undefined;
         try {
           for await (const chunk of stream) {
             try {
-              const t = completionFrom(chunk);
-              if (t) parts.push(t);
+              const { completion: t, thinking: th } = splitCandidateText(chunk);
+              if (t) {
+                if (ttftMs === undefined) ttftMs = Date.now() - startMs;
+                parts.push(t);
+              }
+              if (th) {
+                if (ttftMs === undefined) ttftMs = Date.now() - startMs;
+                thoughtParts.push(th);
+              }
               if (chunk?.usageMetadata) {
-                tin = chunk.usageMetadata.promptTokenCount ?? tin;
-                tout = chunk.usageMetadata.candidatesTokenCount ?? tout;
-                tcached = chunk.usageMetadata.cachedContentTokenCount ?? tcached;
+                usage = mergeGoogleUsage(usage, extractGoogleUsage(chunk.usageMetadata));
               }
               recordToolCalls(chunk, span, span.spanContext().traceId);
             } catch {  }
             yield chunk;
           }
-          span.setAttributes({
-            "gen_ai.response.model": modelName,
-            "gen_ai.usage.input_tokens": tin,
-            "gen_ai.usage.output_tokens": tout,
-            "evalkit.completion": parts.join(""),
-          });
-          if (tcached) span.setAttribute("gen_ai.usage.cached_tokens", tcached);
-          const respBody = safeBody({ text: parts.join("") });
-          if (respBody) span.setAttribute("gen_ai.response.body", respBody);
-          span.setStatus({ code: SpanStatusCode.OK });
         } catch (err) {
-          const error = err instanceof Error ? err : new Error(String(err));
-          span.recordException(error);
-          span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+          failure = err instanceof Error ? err : new Error(String(err));
           throw err;
         } finally {
+          try {
+            const thinking = thoughtParts.join("");
+            span.setAttributes({
+              "gen_ai.response.model": modelName,
+              ...googleUsageAttributes(usage),
+              "evalkit.completion": parts.join(""),
+              ...(thinking && { "gen_ai.response.thinking": thinking }),
+              ...(!failure && ttftMs !== undefined && { "gen_ai.server.time_to_first_token_ms": ttftMs }),
+            });
+            const respBody = safeBody({ text: parts.join("") });
+            if (respBody) span.setAttribute("gen_ai.response.body", respBody);
+          } catch {  }
+          if (failure) {
+            span.recordException(failure);
+            span.setStatus({ code: SpanStatusCode.ERROR, message: failure.message });
+          } else {
+            span.setStatus({ code: SpanStatusCode.OK });
+          }
           span.end();
         }
       }

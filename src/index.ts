@@ -10,7 +10,7 @@ import { patchRedis as _patchRedis } from "./instrumentation/db/redis.js";
 import { patchAxios as _patchAxios } from "./instrumentation/http/axios.js";
 import { patchPg as _patchPg } from "./instrumentation/db/pg.js";
 import { patchMysql2 as _patchMysql2 } from "./instrumentation/db/mysql2.js";
-import { patchBedrock as _patchBedrock } from "./instrumentation/llm/bedrock/index.js";
+import { patchBedrock as _patchBedrock, patchBedrockAgentRuntime as _patchBedrockAgentRuntime } from "./instrumentation/llm/bedrock/index.js";
 import { patchCohere as _patchCohere } from "./instrumentation/llm/cohere/index.js";
 import { patchGoogleAI as _patchGoogleAI } from "./instrumentation/llm/google-ai/index.js";
 import { patchGoogleGenAI as _patchGoogleGenAI } from "./instrumentation/llm/google-genai/index.js";
@@ -40,7 +40,7 @@ import { setupAutoInstrumentation } from "./instrumentation/auto.js";
 import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitOptions } from "./core/types.js";
 
-export type { EvalKitOptions, TraceEnvelope, SpanEvent } from "./core/types.js";
+export type { EvalKitOptions, TraceEnvelope, SpanEvent, MaskHook } from "./core/types.js";
 export type { FastifyPluginOptions } from "./frameworks/fastify/plugin.js";
 export type { ExpressMiddlewareOptions } from "./frameworks/express/middleware.js";
 export type { KoaMiddlewareOptions } from "./frameworks/koa/middleware.js";
@@ -78,6 +78,10 @@ export function patchAnthropicClient(anthropicInstance: any, parentCtx?: OtelCon
 
 export function patchBedrockClient(bedrockRuntimeClient: any): void {
   _patchBedrock(getInstance(), bedrockRuntimeClient);
+}
+
+export function patchBedrockAgentRuntimeClient(bedrockAgentRuntimeClient: any): void {
+  _patchBedrockAgentRuntime(getInstance(), bedrockAgentRuntimeClient);
 }
 
 export function patchAnthropicVertexClient(anthropicVertexInstance: any): void {
@@ -393,6 +397,7 @@ export default {
   patchOpenAIClient,
   patchAnthropicClient,
   patchBedrockClient,
+  patchBedrockAgentRuntimeClient,
   patchAnthropicVertexClient,
   patchVertexGenerativeModel,
   patchCohereClient,

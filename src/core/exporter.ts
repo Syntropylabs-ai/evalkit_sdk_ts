@@ -3,22 +3,109 @@ import { ExportResultCode } from "@opentelemetry/core";
 import type { ExportResult } from "@opentelemetry/core";
 import type { TraceEnvelope, SpanEvent, BatchIngestRequest } from "./types.js";
 import { simByTraceId } from "./simulation.js";
+import { applyMask, stripContent } from "./redact.js";
+import type { MaskHook } from "./redact.js";
 
 const AUTH_FAIL_LIMIT = 3;
 
 const MAX_SPAN_BYTES = 8 * 1024 * 1024;
 
+const CACHE_READ_KEYS = [
+  "gen_ai.usage.cache_read_tokens",
+  "gen_ai.usage.cache_read.input_tokens",
+  "gen_ai.usage.cached_tokens",
+] as const;
+
+const CACHE_CREATION_KEYS = [
+  "gen_ai.usage.cache_creation_tokens",
+  "gen_ai.usage.cache_creation.input_tokens",
+  "gen_ai.usage.cache_write.input_tokens",
+] as const;
+
+const TOKENS_IN_KEYS = [
+  "gen_ai.usage.input_tokens",
+  "gen_ai.usage.prompt_tokens",
+] as const;
+
+const TOKENS_OUT_KEYS = [
+  "gen_ai.usage.output_tokens",
+  "gen_ai.usage.completion_tokens",
+] as const;
+
+const PROMOTED_ATTRIBUTES: ReadonlySet<string> = new Set([
+  "gen_ai.system",
+  "gen_ai.provider.name",
+  "evalkit.span_type",
+  "evalkit.prompt",
+  "evalkit.completion",
+  "evalkit.environment",
+  "evalkit.app_version",
+  "evalkit.user_id",
+  "evalkit.session_id",
+  "evalkit.device_id",
+  "evalkit.sdk_version",
+]);
+
+function firstTokenCount(
+  attrs: Record<string, unknown>,
+  keys: readonly string[]
+): number | undefined {
+  for (const key of keys) {
+    const raw = Number(attrs[key]);
+    if (!Number.isFinite(raw)) continue;
+    const n = Math.round(raw);
+    if (n > 0) return n;
+  }
+  return undefined;
+}
+
+function foldExclusiveCache(
+  tokensIn: number | undefined,
+  cacheRead: number | undefined,
+  cacheCreation: number | undefined
+): number | undefined {
+  const cached = (cacheRead ?? 0) + (cacheCreation ?? 0);
+  if (tokensIn === undefined || cached === 0) return tokensIn;
+  return tokensIn < cached ? tokensIn + cached : tokensIn;
+}
+
 export class EvalKitExporter implements SpanExporter {
   private readonly url: string;
   private readonly subscriptionKey: string;
+  private readonly serviceName?: string;
   private readonly debug: boolean;
+  private readonly captureContent: boolean;
+  private readonly mask?: MaskHook;
   private authFailures = 0;
   private disabled = false;
 
-  constructor(opts: { baseUrl: string; subscriptionKey: string; debug?: boolean }) {
+  constructor(opts: {
+    baseUrl: string;
+    subscriptionKey: string;
+    serviceName?: string;
+    debug?: boolean;
+    captureContent?: boolean;
+    mask?: MaskHook;
+  }) {
     this.url = `${opts.baseUrl.replace(/\/$/, "")}/v1/ingest`;
     this.subscriptionKey = opts.subscriptionKey;
+    this.serviceName = opts.serviceName;
     this.debug = opts.debug ?? false;
+    this.captureContent = opts.captureContent ?? true;
+    this.mask = opts.mask;
+  }
+
+  private redact(envelope: TraceEnvelope): TraceEnvelope | null {
+    const stripped = this.captureContent ? envelope : stripContent(envelope);
+    return this.mask ? applyMask(this.mask, stripped) : stripped;
+  }
+
+  private serviceNameFor(span: ReadableSpan): string | undefined {
+    const fromResource = span.resource.attributes["service.name"] as string | undefined;
+    if (this.serviceName && (!fromResource || fromResource.startsWith("unknown_service"))) {
+      return this.serviceName;
+    }
+    return fromResource;
   }
 
   export(spans: ReadableSpan[], resultCallback: (result: ExportResult) => void): void {
@@ -33,7 +120,9 @@ export class EvalKitExporter implements SpanExporter {
     });
 
     const events = nonAdkSpans
-      .map((s) => fitEnvelope(this.toEnvelope(s), this.debug))
+      .map((s) => this.redact(this.toEnvelope(s)))
+      .filter((e): e is TraceEnvelope => e !== null)
+      .map((e) => fitEnvelope(e, this.debug))
       .filter((e): e is TraceEnvelope => e !== null);
 
     if (events.length === 0) {
@@ -130,6 +219,8 @@ export class EvalKitExporter implements SpanExporter {
     }));
 
     const foreignLlm = !COUNT_FOREIGN_LLM && isForeignGenAi(attrs);
+    const cacheReadTokens = foreignLlm ? undefined : firstTokenCount(attrs, CACHE_READ_KEYS);
+    const cacheCreationTokens = foreignLlm ? undefined : firstTokenCount(attrs, CACHE_CREATION_KEYS);
     const envelope: TraceEnvelope = {
       traceId: ctx.traceId,
       spanId: ctx.spanId,
@@ -139,17 +230,19 @@ export class EvalKitExporter implements SpanExporter {
       spanType: (attrs["evalkit.span_type"] as TraceEnvelope["spanType"]) ?? (foreignLlm ? "function_call" : inferSpanType(span, attrs)),
       status: otelStatusToString(span.status.code),
       statusMessage: span.status.message,
-      serviceName: span.resource.attributes["service.name"] as string | undefined,
+      serviceName: this.serviceNameFor(span),
       operation: span.name,
       model: (attrs["gen_ai.response.model"] ?? attrs["gen_ai.request.model"]) as string | undefined,
-      provider: attrs["gen_ai.system"] as string | undefined,
+      provider: (attrs["gen_ai.system"] || attrs["gen_ai.provider.name"]) as string | undefined,
       prompt: attrs["evalkit.prompt"] as string | undefined,
       completion: attrs["evalkit.completion"] as string | undefined,
-      tokensIn: foreignLlm ? undefined : (Math.round((attrs["gen_ai.usage.input_tokens"] as number) || 0) || undefined),
-      tokensOut: foreignLlm ? undefined : (Math.round((attrs["gen_ai.usage.output_tokens"] as number) || 0) || undefined),
+      tokensIn: foreignLlm
+        ? undefined
+        : foldExclusiveCache(firstTokenCount(attrs, TOKENS_IN_KEYS), cacheReadTokens, cacheCreationTokens),
+      tokensOut: foreignLlm ? undefined : firstTokenCount(attrs, TOKENS_OUT_KEYS),
 
-      cacheReadTokens: foreignLlm ? undefined : (Math.round(((attrs["gen_ai.usage.cache_read_tokens"] ?? attrs["gen_ai.usage.cached_tokens"]) as number) || 0) || undefined),
-      cacheCreationTokens: foreignLlm ? undefined : (Math.round((attrs["gen_ai.usage.cache_creation_tokens"] as number) || 0) || undefined),
+      cacheReadTokens,
+      cacheCreationTokens,
       latencyMs: Math.round(endMs - startMs),
       startTime: new Date(startMs).toISOString(),
       endTime: new Date(endMs).toISOString(),
@@ -181,13 +274,18 @@ const COUNT_FOREIGN_LLM = process.env.EVALKIT_COUNT_FOREIGN_LLM === "1" || proce
 function isForeignGenAi(attrs: Record<string, unknown>): boolean {
   if (attrs["evalkit.span_type"] !== undefined) return false;
   return attrs["gen_ai.system"] !== undefined
+      || attrs["gen_ai.provider.name"] !== undefined
       || attrs["gen_ai.usage.input_tokens"] !== undefined
       || attrs["gen_ai.usage.output_tokens"] !== undefined
+      || attrs["gen_ai.usage.prompt_tokens"] !== undefined
+      || attrs["gen_ai.usage.completion_tokens"] !== undefined
       || attrs["gen_ai.operation.name"] !== undefined
-      || attrs["gen_ai.request.model"] !== undefined;
+      || attrs["gen_ai.request.model"] !== undefined
+      || attrs["gen_ai.response.model"] !== undefined;
 }
 
 function inferSpanType(span: ReadableSpan, attrs: Record<string, unknown>): TraceEnvelope["spanType"] {
+  if (attrs["gen_ai.system"] || attrs["gen_ai.provider.name"] || attrs["gen_ai.request.model"] || attrs["gen_ai.response.model"]) return "llm_call";
   if (attrs["db.system"] || attrs["db.statement"] || attrs["db.operation"] || attrs["db.mongodb.collection"]) return "db_query";
   if (attrs["http.method"] || attrs["http.request.method"] || attrs["url.full"] || attrs["http.url"]) return "http_call";
   const scope = String((span as any).instrumentationScope?.name ?? (span as any).instrumentationLibrary?.name ?? "").toLowerCase();
@@ -261,7 +359,7 @@ function buildAttributes(
 ): Record<string, string | number | boolean | string[]> {
   const out: Record<string, string | number | boolean | string[]> = {};
   for (const [k, v] of Object.entries(attrs)) {
-    if (k.startsWith("evalkit.") || k === "gen_ai.system") continue;
+    if (PROMOTED_ATTRIBUTES.has(k)) continue;
     if (v !== undefined && v !== null) {
       out[k] = v as string | number | boolean | string[];
     }

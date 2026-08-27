@@ -1,7 +1,7 @@
 {
   "name": "syntropylabs-evalkit",
-  "version": "0.2.13",
-  "description": "EvalKit TypeScript SDK — OpenTelemetry-based LLM observability and tracing",
+  "version": "0.2.14",
+  "description": "EvalKit TypeScript SDK \u2014 OpenTelemetry-based LLM observability and tracing",
   "license": "Apache-2.0",
   "author": "Syntropy Labs",
   "homepage": "https://syntropylabs.ai",
@@ -49,7 +49,7 @@
     "build": "tsup src/index.ts --format cjs,esm --dts --clean --minify --treeshake --no-sourcemap",
     "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node test/autotrace.e2e.mjs",
+    "test": "npm run build && node test/autotrace.e2e.mjs && node test/host-otel.e2e.mjs && node test/explicit-provider.e2e.mjs && node test/redaction.e2e.mjs && node test/streaming-ttft.e2e.mjs && node test/stream-failure.e2e.mjs && node test/google-genai-thinking.e2e.mjs && node test/stream-usage-warning.e2e.mjs && node test/attr-spellings.e2e.mjs && node test/foreign-llm-counted.e2e.mjs && node tests/smoke.cjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
@@ -64,6 +64,7 @@
     "@anthropic-ai/sdk": ">=0.20.0",
     "openai": ">=4.0.0",
     "@aws-sdk/client-bedrock-runtime": "*",
+    "@aws-sdk/client-bedrock-agent-runtime": "*",
     "cohere-ai": "*",
     "@google/generative-ai": "*",
     "@google/genai": "*",
@@ -91,6 +92,9 @@
       "optional": true
     },
     "@aws-sdk/client-bedrock-runtime": {
+      "optional": true
+    },
+    "@aws-sdk/client-bedrock-agent-runtime": {
       "optional": true
     },
     "cohere-ai": {

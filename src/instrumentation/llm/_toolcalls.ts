@@ -61,6 +61,19 @@ export function fromAnthropicBlocks(blocks: any, _ts?: string): NormalizedToolCa
   return out;
 }
 
+export function fromConverseBlocks(blocks: any, _ts?: string): NormalizedToolCall[] {
+  const out: NormalizedToolCall[] = [];
+  try {
+    for (const block of blocks ?? []) {
+      const use = block?.toolUse;
+      const name = use?.name ?? "";
+      if (!name) continue;
+      out.push({ name, argsJson: truncate(toJson(use?.input ?? {})), id: use?.toolUseId ?? "" });
+    }
+  } catch {  }
+  return out;
+}
+
 export function fromGoogleParts(resp: any, _ts?: string): NormalizedToolCall[] {
   const out: NormalizedToolCall[] = [];
   try {

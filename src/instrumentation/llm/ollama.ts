@@ -30,21 +30,21 @@ function wrapOllamaStream(stream: any, span: Span, startMs: number): any {
   function finish(error?: Error) {
     if (finished) return;
     finished = true;
+    span.setAttributes({
+      "evalkit.completion": content,
+      ...(thinking && { "gen_ai.response.thinking": thinking }),
+      "gen_ai.usage.input_tokens": tokensIn,
+      "gen_ai.usage.output_tokens": tokensOut,
+      "gen_ai.streaming": true,
+      ...(doneReason && { "gen_ai.response.finish_reasons": [doneReason] }),
+      ...(!error && ttftMs !== undefined && { "gen_ai.server.time_to_first_token_ms": ttftMs }),
+    });
+    const body = safeBody(chunks);
+    if (body) span.setAttribute("gen_ai.response.body", body);
     if (error) {
       span.recordException(error);
       span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
     } else {
-      span.setAttributes({
-        "evalkit.completion": content,
-        ...(thinking && { "gen_ai.response.thinking": thinking }),
-        "gen_ai.usage.input_tokens": tokensIn,
-        "gen_ai.usage.output_tokens": tokensOut,
-        "gen_ai.streaming": true,
-        ...(doneReason && { "gen_ai.response.finish_reasons": [doneReason] }),
-        ...(ttftMs !== undefined && { "gen_ai.server.time_to_first_token_ms": ttftMs }),
-      });
-      const body = safeBody(chunks);
-      if (body) span.setAttribute("gen_ai.response.body", body);
       span.setStatus({ code: SpanStatusCode.OK });
     }
     span.end();
@@ -65,10 +65,11 @@ function wrapOllamaStream(stream: any, span: Span, startMs: number): any {
         if (chunk?.done_reason) doneReason = chunk.done_reason;
         yield chunk;
       }
-      finish();
     } catch (err) {
       finish(err instanceof Error ? err : new Error(String(err)));
       throw err;
+    } finally {
+      try { finish(); } catch {  }
     }
   }
 

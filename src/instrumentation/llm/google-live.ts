@@ -1,4 +1,5 @@
 import type { EvalKitClient } from '../../core/client.js';
+import { extractGoogleUsage, googleUsageAttributes } from './_google-usage.js';
 
 const MAX_TEXT = 8192;
 
@@ -109,10 +110,7 @@ function wireSession(
     const reqBody = requestDump.length ? safeJson(requestDump) : undefined;
     const respBody = responseDump.length ? safeJson(responseDump) : undefined;
 
-    const tokensIn = usage?.promptTokenCount ?? 0;
-    const tokensOut = usage?.responseTokenCount ?? 0;
-    const reasoningTokens = usage?.thoughtsTokenCount ?? 0;
-    const cachedTokens = usage?.cachedContentTokenCount ?? 0;
+    const counts = extractGoogleUsage(usage);
     const audioTokensIn = modalityTokens(usage?.promptTokensDetails, 'AUDIO');
     const audioTokensOut = modalityTokens(usage?.responseTokensDetails, 'AUDIO');
 
@@ -124,9 +122,7 @@ function wireSession(
       ...(thinking && { 'gen_ai.response.thinking': thinking.slice(0, MAX_TEXT) }),
       ...(reqBody && { 'gen_ai.request.body': reqBody }),
       ...(respBody && { 'gen_ai.response.body': respBody }),
-      ...(usage && { 'gen_ai.usage.input_tokens': tokensIn, 'gen_ai.usage.output_tokens': tokensOut }),
-      ...(reasoningTokens && { 'gen_ai.usage.reasoning_tokens': reasoningTokens }),
-      ...(cachedTokens && { 'gen_ai.usage.cached_tokens': cachedTokens }),
+      ...(usage ? googleUsageAttributes(counts) : {}),
       ...(audioTokensIn && { 'gen_ai.usage.audio_input_tokens': audioTokensIn }),
       ...(audioTokensOut && { 'gen_ai.usage.audio_output_tokens': audioTokensOut }),
       'llm.turn_ms': ms,

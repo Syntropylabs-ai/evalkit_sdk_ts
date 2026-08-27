@@ -1,3 +1,5 @@
+import type { TracerProvider } from "@opentelemetry/api";
+
 export interface TraceEnvelope {
 
   traceId: string;
@@ -55,6 +57,8 @@ export interface BatchIngestRequest {
   events: TraceEnvelope[];
 }
 
+export type MaskHook = (envelope: TraceEnvelope) => TraceEnvelope | null | undefined;
+
 export interface EvalKitOptions {
   subscriptionKey: string;
 
@@ -79,4 +83,10 @@ export interface EvalKitOptions {
   deviceId?: string;
 
   captureGlobalErrors?: boolean;
+
+  captureContent?: boolean;
+
+  mask?: MaskHook;
+
+  tracerProvider?: TracerProvider;
 }

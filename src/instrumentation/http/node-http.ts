@@ -1,8 +1,8 @@
 import * as http from 'http';
 import * as https from 'https';
-import { createRequire } from 'module';
 import { trace, context as otelContext, SpanKind, SpanStatusCode } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
+import { requireBuiltin } from '../../utils/dynimport.js';
 import { sanitizeHeaders } from '../../utils/headers.js';
 import { _evalkitAxiosSpanMap } from '../../utils/axios-span-map.js';
 
@@ -53,11 +53,8 @@ export function patchHttp(client: EvalKitClient): void {
   let httpMod: typeof http;
   let httpsMod: typeof https;
   try {
-    const _req: NodeRequire = typeof require !== 'undefined'
-      ? require
-      : createRequire(import.meta.url);
-    httpMod = _req('http');
-    httpsMod = _req('https');
+    httpMod = requireBuiltin<typeof http>('http');
+    httpsMod = requireBuiltin<typeof https>('https');
   } catch {
     return;
   }
@@ -164,10 +161,7 @@ export function patchHttp(client: EvalKitClient): void {
 export function patchIncomingHttp(client: EvalKitClient): void {
   let httpMod: typeof http;
   try {
-    const _req: NodeRequire = typeof require !== 'undefined'
-      ? require
-      : createRequire(import.meta.url);
-    httpMod = _req('http');
+    httpMod = requireBuiltin<typeof http>('http');
   } catch {
     return;
   }

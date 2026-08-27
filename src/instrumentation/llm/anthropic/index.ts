@@ -71,23 +71,23 @@ function wrapAnthropicStream(stream: any, span: Span, startMs: number = Date.now
   function finish(error?: Error) {
     if (finished) return;
     finished = true;
+    span.setAttributes({
+      'evalkit.completion': content,
+      'gen_ai.usage.input_tokens': tokensIn,
+      'gen_ai.usage.output_tokens': tokensOut,
+      ...(cacheReadTokens > 0 && { 'gen_ai.usage.cache_read_tokens': cacheReadTokens }),
+      ...(cacheCreationTokens > 0 && { 'gen_ai.usage.cache_creation_tokens': cacheCreationTokens }),
+      'gen_ai.streaming': true,
+      ...(thinking && { 'gen_ai.response.thinking': thinking }),
+      ...(hasRedactedThinking && { 'gen_ai.response.has_redacted_thinking': true }),
+      ...(!error && ttftMs !== undefined && { 'gen_ai.server.time_to_first_token_ms': ttftMs }),
+    });
+    const body = safeBody({ text: content });
+    if (body) span.setAttribute('gen_ai.response.body', body);
     if (error) {
       span.recordException(error);
       span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
     } else {
-      span.setAttributes({
-        'evalkit.completion': content,
-        'gen_ai.usage.input_tokens': tokensIn,
-        'gen_ai.usage.output_tokens': tokensOut,
-        ...(cacheReadTokens > 0 && { 'gen_ai.usage.cache_read_tokens': cacheReadTokens }),
-        ...(cacheCreationTokens > 0 && { 'gen_ai.usage.cache_creation_tokens': cacheCreationTokens }),
-        'gen_ai.streaming': true,
-        ...(thinking && { 'gen_ai.response.thinking': thinking }),
-        ...(hasRedactedThinking && { 'gen_ai.response.has_redacted_thinking': true }),
-        ...(ttftMs !== undefined && { 'gen_ai.server.time_to_first_token_ms': ttftMs }),
-      });
-      const body = safeBody({ text: content });
-      if (body) span.setAttribute('gen_ai.response.body', body);
       span.setStatus({ code: SpanStatusCode.OK });
     }
     span.end();

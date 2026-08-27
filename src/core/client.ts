@@ -1,14 +1,13 @@
 import { trace, context, SpanKind, SpanStatusCode } from "@opentelemetry/api";
-import type { Tracer, Context as OtelContext } from "@opentelemetry/api";
-import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
-import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
-import { resourceFromAttributes } from "@opentelemetry/resources";
-import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
-import type { EvalKitOptions } from "./types.js";
-import { EvalKitExporter } from "./exporter.js";
+import type { Tracer, TracerProvider, Context as OtelContext } from "@opentelemetry/api";
+import type { SpanProcessor } from "@opentelemetry/sdk-trace-base";
+import type { EvalKitOptions, MaskHook } from "./types.js";
+import { detachSpanProcessor, resolveTracing } from "./provider.js";
+import type { TracingMode } from "./provider.js";
 import { errorAttrs } from "./errors-util.js";
+import { resolveCaptureContent } from "./redact.js";
 
-const SDK_VERSION = "0.2.13";
+const SDK_VERSION = "0.2.14";
 
 const IO_MAX = 4096;
 
@@ -36,17 +35,23 @@ function ioAttr(key: string, value: unknown, captureIO: boolean): Record<string,
   return s === undefined ? undefined : { [key]: s };
 }
 
-type ResolvedOptions = Required<Omit<EvalKitOptions, "baseUrl" | "apiUrl" | "environment" | "appVersion" | "deviceId">> & {
+type ResolvedOptions = Required<
+  Omit<EvalKitOptions, "baseUrl" | "apiUrl" | "environment" | "appVersion" | "deviceId" | "tracerProvider" | "mask">
+> & {
   baseUrl: string;
   apiUrl: string;
   environment: string;
   appVersion: string;
   deviceId?: string;
+  tracerProvider?: TracerProvider;
+  mask?: MaskHook;
 };
 
 export class EvalKitClient {
   readonly options: ResolvedOptions;
-  private provider: NodeTracerProvider;
+  readonly provider: TracerProvider;
+  readonly tracingMode: TracingMode;
+  private readonly processor: SpanProcessor;
   readonly tracer: Tracer;
 
   constructor(opts: EvalKitOptions) {
@@ -62,28 +67,27 @@ export class EvalKitClient {
       appVersion: "",
       captureGlobalErrors: false,
       ...opts,
+      captureContent: resolveCaptureContent(opts.captureContent),
     };
 
-    const exporter = new EvalKitExporter({
-      baseUrl: this.options.baseUrl,
-      subscriptionKey: this.options.subscriptionKey,
-      debug: this.options.debug,
-    });
+    const tracing = resolveTracing(
+      {
+        baseUrl: this.options.baseUrl,
+        subscriptionKey: this.options.subscriptionKey,
+        serviceName: this.options.serviceName,
+        debug: this.options.debug,
+        maxExportBatchSize: this.options.maxExportBatchSize,
+        scheduledDelayMillis: this.options.scheduledDelayMillis,
+        captureContent: this.options.captureContent,
+        mask: this.options.mask,
+      },
+      this.options.tracerProvider
+    );
 
-    this.provider = new NodeTracerProvider({
-      resource: resourceFromAttributes({
-        [ATTR_SERVICE_NAME]: this.options.serviceName,
-      }),
-      spanProcessors: [
-        new BatchSpanProcessor(exporter, {
-          maxExportBatchSize: this.options.maxExportBatchSize,
-          scheduledDelayMillis: this.options.scheduledDelayMillis,
-        }),
-      ],
-    });
-
-    this.provider.register();
-    this.tracer = trace.getTracer("evalkit", "0.1.0");
+    this.provider = tracing.provider;
+    this.processor = tracing.processor;
+    this.tracingMode = tracing.mode;
+    this.tracer = this.provider.getTracer("evalkit", SDK_VERSION);
   }
 
   private metaAttributes(): Record<string, string> {
@@ -312,10 +316,15 @@ export class EvalKitClient {
   }
 
   async flush(): Promise<void> {
-    await this.provider.forceFlush();
+    await this.processor.forceFlush();
   }
 
   async destroy(): Promise<void> {
-    await this.provider.shutdown();
+    if (this.tracingMode !== "attached") {
+      await (this.provider as unknown as { shutdown(): Promise<void> }).shutdown();
+      return;
+    }
+    detachSpanProcessor(this.provider, this.processor);
+    await this.processor.shutdown();
   }
 }

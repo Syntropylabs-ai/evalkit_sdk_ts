@@ -93,6 +93,7 @@ Available helpers:
 patchOpenAIClient(client)
 patchAnthropicClient(client)
 patchBedrockClient(bedrockRuntimeClient)
+patchBedrockAgentRuntimeClient(bedrockAgentRuntimeClient)
 patchAnthropicVertexClient(client)
 patchVertexGenerativeModel(model)
 patchCohereClient(client)

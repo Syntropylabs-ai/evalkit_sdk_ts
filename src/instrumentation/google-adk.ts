@@ -134,9 +134,13 @@ export function patchGoogleAdk(client: EvalKitClient, adkModule: any): void {
       });
     } catch {  }
 
+    let failure: Error | undefined;
     try {
       yield* originalAgentRunAsync.call(this, parentContext, ...(rest as never[]));
-
+    } catch (err) {
+      failure = err instanceof Error ? err : new Error(String(err));
+      throw err;
+    } finally {
       if (span) {
         try {
           const events = parentContext?.session?.events ?? [];
@@ -153,19 +157,17 @@ export function patchGoogleAdk(client: EvalKitClient, adkModule: any): void {
             "function.result",
             truncate(toJson({ text, tool_calls: toolCalls, retrieved_context: [] })),
           );
-          span.setStatus({ code: SpanStatusCode.OK });
         } catch {  }
+        if (failure) {
+          try {
+            span.recordException(failure);
+            span.setStatus({ code: SpanStatusCode.ERROR, message: failure.message });
+          } catch {  }
+        } else {
+          try { span.setStatus({ code: SpanStatusCode.OK }); } catch {  }
+        }
         span.end();
       }
-    } catch (err) {
-      if (span) {
-        try {
-          span.recordException(err instanceof Error ? err : new Error(String(err)));
-          span.setStatus({ code: SpanStatusCode.ERROR, message: err instanceof Error ? err.message : String(err) });
-        } catch {  }
-        span.end();
-      }
-      throw err;
     }
   };
   (BaseAgent.prototype.runAsync as { __evalkit?: boolean }).__evalkit = true;

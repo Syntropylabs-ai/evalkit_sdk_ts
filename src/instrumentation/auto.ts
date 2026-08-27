@@ -2,7 +2,7 @@ import type { EvalKitClient } from '../core/client.js';
 import { dynImport, loadIfAlreadyRequired, getRequire } from '../utils/dynimport.js';
 import { patchOpenAI } from './llm/openai/index.js';
 import { patchAnthropic } from './llm/anthropic/index.js';
-import { patchBedrock } from './llm/bedrock/index.js';
+import { patchBedrock, patchBedrockAgentRuntime } from './llm/bedrock/index.js';
 import { patchAnthropicVertex, patchVertexGenerativeModel } from './llm/vertex-ai/index.js';
 import { patchCohere } from './llm/cohere/index.js';
 import { patchGoogleAI } from './llm/google-ai/index.js';
@@ -136,6 +136,22 @@ async function tryPatchBedrockAsync(client: EvalKitClient): Promise<void> {
     const ClientClass = mod.BedrockRuntimeClient ?? mod.default?.BedrockRuntimeClient;
     const proto = ClientClass?.prototype;
     if (proto) patchBedrock(client, proto);
+  } catch {}
+}
+
+async function tryPatchBedrockAgentRuntimeAsync(client: EvalKitClient): Promise<void> {
+  try {
+    const _req = getRequire();
+    const mod = _req('@aws-sdk/client-bedrock-agent-runtime');
+    const ClientClass = mod.BedrockAgentRuntimeClient ?? mod.default?.BedrockAgentRuntimeClient;
+    const proto = ClientClass?.prototype;
+    if (proto) { patchBedrockAgentRuntime(client, proto); return; }
+  } catch {}
+  try {
+    const mod = await dynImport('@aws-sdk/client-bedrock-agent-runtime');
+    const ClientClass = mod.BedrockAgentRuntimeClient ?? mod.default?.BedrockAgentRuntimeClient;
+    const proto = ClientClass?.prototype;
+    if (proto) patchBedrockAgentRuntime(client, proto);
   } catch {}
 }
 
@@ -289,7 +305,7 @@ const OTEL_DISABLED_NATIVE = {
   '@opentelemetry/instrumentation-http': { enabled: false },
 };
 
-async function tryRegisterOtelInstrumentations(): Promise<void> {
+async function tryRegisterOtelInstrumentations(client: EvalKitClient): Promise<void> {
   try {
     const reg = (await dynImport('@opentelemetry/instrumentation'))?.registerInstrumentations;
     if (!reg) return;
@@ -306,7 +322,7 @@ async function tryRegisterOtelInstrumentations(): Promise<void> {
         } catch {}
       }
     }
-    if (instrumentations.length) reg({ instrumentations });
+    if (instrumentations.length) reg({ instrumentations, tracerProvider: client.provider });
   } catch {}
 }
 
@@ -449,6 +465,7 @@ export function setupAutoInstrumentation(client: EvalKitClient): void {
     tryPatchOpenAIAsync(client),
     tryPatchAnthropicAsync(client),
     tryPatchBedrockAsync(client),
+    tryPatchBedrockAgentRuntimeAsync(client),
     tryPatchAnthropicVertexAsync(client),
     tryPatchVertexAIAsync(client),
     tryPatchCohereAsync(client),
@@ -470,7 +487,7 @@ export function setupAutoInstrumentation(client: EvalKitClient): void {
     tryPatchAssemblyAIAsync(client),
   ]).catch(() => {});
 
-  tryRegisterOtelInstrumentations()
+  tryRegisterOtelInstrumentations(client)
     .then(() => Promise.all([
       Promise.resolve(tryPatchMongoose(client)),
       tryPatchPgAsync(client),
