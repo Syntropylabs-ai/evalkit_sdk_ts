@@ -1,7 +1,13 @@
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api";
 import { evaluate as _evaluate } from "./evaluate.js";
 import { generateScenarios as _generateScenarios, simulateUser as _simulateUser, evaluateSimulation as _evaluateSimulation } from "./simulate.js";
+import { feedback as _feedback, reward as _reward } from "./feedback.js";
+import { Eval as _Eval } from "./eval.js";
+import { getPrompt as _getPrompt, clearPromptCache, withPrompt, currentPrompt, Prompt } from "./prompts.js";
 import { EvalKitClient } from "./core/client.js";
+import type { StartTraceOptions } from "./core/client.js";
+import { currentIdentity, setUser as _setUser } from "./core/identity.js";
+import type { Identity } from "./core/identity.js";
 import { extractTraceparent as _extractTraceparentHelper } from "./core/context.js";
 import { patchOpenAI } from "./instrumentation/llm/openai/index.js";
 import { patchAnthropic } from "./instrumentation/llm/anthropic/index.js";
@@ -51,6 +57,15 @@ export { EvalKitInterceptor } from "./frameworks/nestjs/interceptor.js";
 
 export { evaluate } from "./evaluate.js";
 export type { OfflineEvalInput, OfflineEvalResult, OfflineMetric } from "./evaluate.js";
+
+export { EvalResult } from "./eval.js";
+export type { EvalOptions, EvalRow, EvalRowResult, EvalGate, EvalSummary, LocalEvaluator, LocalScore, LocalScoreValue } from "./eval.js";
+export type { Identity } from "./core/identity.js";
+export type { StartTraceOptions } from "./core/client.js";
+export type { FeedbackOptions, FeedbackResult, FeedbackKind } from "./feedback.js";
+export { Prompt, withPrompt, currentPrompt, compileTemplate, variablesOf } from "./prompts.js";
+export type { PromptPayload, PromptTemplate, PromptMessage, PromptVariables, GetPromptOptions } from "./prompts.js";
+export type { PromptRef } from "./core/prompt-context.js";
 
 export type { SimContext, AgentTurnResult, GenerateScenariosOptions, SimulateUserOptions, EvaluateSimulationOptions, EvaluateSimulationResult, SimEvalMetric, SimEvalScenario } from "./simulate.js";
 
@@ -224,9 +239,17 @@ export function createNestjsInterceptor(): EvalKitInterceptor {
 
 export function startTrace(
   name: string,
-  attributes?: Record<string, string>
+  attributesOrOptions?: Record<string, string> | StartTraceOptions
 ): { traceId: string; end: (status?: "OK" | "ERROR") => void; ctx: OtelContext } {
-  return getInstance().startTrace(name, attributes);
+  return getInstance().startTrace(name, attributesOrOptions);
+}
+
+export function setUser(identity?: Identity | null): void {
+  _setUser(identity);
+}
+
+export function currentUser(): Identity {
+  return currentIdentity();
 }
 
 export async function flush(): Promise<void> {
@@ -383,6 +406,31 @@ export function evaluateSimulation(
   return _evaluateSimulation(getInstance(), opts);
 }
 
+export function feedback(opts: import("./feedback.js").FeedbackOptions): Promise<import("./feedback.js").FeedbackResult> {
+  return _feedback(getInstance(), opts);
+}
+
+export const prompts = {
+  get(name: string, opts?: import("./prompts.js").GetPromptOptions): Promise<Prompt> {
+    return _getPrompt(getInstance(), name, opts);
+  },
+  clearCache: clearPromptCache,
+  withPrompt,
+  current: currentPrompt,
+};
+
+export function reward(
+  traceId: string,
+  value: number,
+  opts: Omit<import("./feedback.js").FeedbackOptions, "traceId" | "kind" | "value"> = {},
+): Promise<import("./feedback.js").FeedbackResult> {
+  return _reward(getInstance(), traceId, value, opts);
+}
+
+export function Eval(opts: import("./eval.js").EvalOptions): Promise<import("./eval.js").EvalResult> {
+  return _Eval(getInstance(), opts);
+}
+
 function _extractTraceparent(header: string | undefined): OtelContext {
   return _extractTraceparentHelper(header);
 }
@@ -390,6 +438,12 @@ function _extractTraceparent(header: string | undefined): OtelContext {
 export default {
   init,
   evaluate: _evaluate,
+  Eval,
+  feedback,
+  reward,
+  prompts,
+  Prompt,
+  withPrompt,
   generateScenarios,
   simulateUser,
   evaluateSimulation,
@@ -435,6 +489,8 @@ export default {
   startTrace,
   startHttpTrace,
   startSpan,
+  setUser,
+  currentUser,
   traceFunction,
   traceTool,
   traceObject,

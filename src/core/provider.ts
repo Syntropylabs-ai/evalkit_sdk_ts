@@ -5,8 +5,11 @@ import type { SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
+import type { Context as OtelContext } from "@opentelemetry/api";
+import type { ReadableSpan, Span } from "@opentelemetry/sdk-trace-base";
 import { EvalKitExporter } from "./exporter.js";
 import type { MaskHook } from "./redact.js";
+import { activePromptRef, promptAttributes } from "./prompt-context.js";
 
 export interface SpanPipelineOptions {
   baseUrl: string;
@@ -39,6 +42,34 @@ function warnOnce(message: string): void {
   }
 }
 
+class ContextStampingProcessor implements SpanProcessor {
+  constructor(private readonly inner: SpanProcessor) {}
+
+  onStart(span: Span, parentContext: OtelContext): void {
+    if (span.attributes["evalkit.span_type"] === "llm_call") {
+      const ref = activePromptRef(parentContext);
+      if (ref) {
+        for (const [key, value] of Object.entries(promptAttributes(ref))) {
+          if (span.attributes[key] === undefined) span.setAttribute(key, value);
+        }
+      }
+    }
+    this.inner.onStart(span, parentContext);
+  }
+
+  onEnd(span: ReadableSpan): void {
+    this.inner.onEnd(span);
+  }
+
+  forceFlush(): Promise<void> {
+    return this.inner.forceFlush();
+  }
+
+  shutdown(): Promise<void> {
+    return this.inner.shutdown();
+  }
+}
+
 export function createSpanProcessor(opts: SpanPipelineOptions): SpanProcessor {
   const exporter = new EvalKitExporter({
     baseUrl: opts.baseUrl,
@@ -48,10 +79,11 @@ export function createSpanProcessor(opts: SpanPipelineOptions): SpanProcessor {
     captureContent: opts.captureContent,
     mask: opts.mask,
   });
-  return new BatchSpanProcessor(exporter, {
+  const batch = new BatchSpanProcessor(exporter, {
     maxExportBatchSize: opts.maxExportBatchSize,
     scheduledDelayMillis: opts.scheduledDelayMillis,
   });
+  return new ContextStampingProcessor(batch);
 }
 
 function processorListOf(provider: unknown): SpanProcessor[] | undefined {

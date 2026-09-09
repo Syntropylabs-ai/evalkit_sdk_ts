@@ -6,8 +6,31 @@ import { detachSpanProcessor, resolveTracing } from "./provider.js";
 import type { TracingMode } from "./provider.js";
 import { errorAttrs } from "./errors-util.js";
 import { resolveCaptureContent } from "./redact.js";
+import { bindIdentity, identityAttributes, identityFromAttributes, isIdentityEmpty } from "./identity.js";
+import type { Identity } from "./identity.js";
 
-const SDK_VERSION = "0.2.14";
+export interface StartTraceOptions extends Identity {
+  attributes?: Record<string, string>;
+}
+
+const START_TRACE_OPTION_KEYS = ["userId", "sessionId", "deviceId", "attributes"] as const;
+
+function toStartTraceOptions(
+  value?: Record<string, string> | StartTraceOptions
+): StartTraceOptions {
+  if (!value) return {};
+  const looksLikeOptions = START_TRACE_OPTION_KEYS.some((key) => key in value);
+  if (!looksLikeOptions) return { attributes: value as Record<string, string> };
+  const options = value as StartTraceOptions;
+  return {
+    userId: options.userId,
+    sessionId: options.sessionId,
+    deviceId: options.deviceId,
+    attributes: options.attributes,
+  };
+}
+
+const SDK_VERSION = "0.2.15";
 
 const IO_MAX = 4096;
 
@@ -100,11 +123,15 @@ export class EvalKitClient {
     return meta;
   }
 
-  startTrace(name: string, attributes?: Record<string, string>): {
+  startTrace(name: string, attributesOrOptions?: Record<string, string> | StartTraceOptions): {
     traceId: string;
     end: (status?: "OK" | "ERROR") => void;
     ctx: OtelContext;
   } {
+    const options = toStartTraceOptions(attributesOrOptions);
+    const identity: Identity = isIdentityEmpty(options)
+      ? identityFromAttributes(options.attributes)
+      : options;
     const span = this.tracer.startSpan(
       name,
       {
@@ -112,7 +139,8 @@ export class EvalKitClient {
         attributes: {
           "evalkit.span_type": "log",
           ...this.metaAttributes(),
-          ...attributes,
+          ...identityAttributes(identity),
+          ...options.attributes,
         },
       },
       context.active()
@@ -120,6 +148,7 @@ export class EvalKitClient {
 
     const ctx = trace.setSpan(context.active(), span);
     const traceId = span.spanContext().traceId;
+    if (!isIdentityEmpty(identity)) bindIdentity(traceId, identity);
 
     return {
       traceId,

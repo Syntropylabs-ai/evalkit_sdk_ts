@@ -3,6 +3,7 @@ import { ExportResultCode } from "@opentelemetry/core";
 import type { ExportResult } from "@opentelemetry/core";
 import type { TraceEnvelope, SpanEvent, BatchIngestRequest } from "./types.js";
 import { simByTraceId } from "./simulation.js";
+import { identityFor } from "./identity.js";
 import { applyMask, stripContent } from "./redact.js";
 import type { MaskHook } from "./redact.js";
 
@@ -218,6 +219,7 @@ export class EvalKitExporter implements SpanExporter {
       attributes: e.attributes as Record<string, string | number | boolean>,
     }));
 
+    const identity = identityFor(ctx.traceId);
     const foreignLlm = !COUNT_FOREIGN_LLM && isForeignGenAi(attrs);
     const cacheReadTokens = foreignLlm ? undefined : firstTokenCount(attrs, CACHE_READ_KEYS);
     const cacheCreationTokens = foreignLlm ? undefined : firstTokenCount(attrs, CACHE_CREATION_KEYS);
@@ -251,9 +253,9 @@ export class EvalKitExporter implements SpanExporter {
       createdAt: new Date(startMs).toISOString(),
       environment: attrs["evalkit.environment"] as string | undefined,
       appVersion: attrs["evalkit.app_version"] as string | undefined,
-      userId: attrs["evalkit.user_id"] as string | undefined,
-      sessionId: attrs["evalkit.session_id"] as string | undefined,
-      deviceId: attrs["evalkit.device_id"] as string | undefined,
+      userId: (attrs["evalkit.user_id"] as string | undefined) ?? identity.userId,
+      sessionId: (attrs["evalkit.session_id"] as string | undefined) ?? identity.sessionId,
+      deviceId: (attrs["evalkit.device_id"] as string | undefined) ?? identity.deviceId,
       sdkVersion: attrs["evalkit.sdk_version"] as string | undefined,
     };
 
