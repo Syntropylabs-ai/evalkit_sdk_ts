@@ -5,6 +5,7 @@ import type { TraceEnvelope, SpanEvent, BatchIngestRequest } from "./types.js";
 import { simByTraceId } from "./simulation.js";
 import { identityFor } from "./identity.js";
 import { applyMask, stripContent } from "./redact.js";
+import { scrubSecrets } from "./secrets.js";
 import type { MaskHook } from "./redact.js";
 
 const AUTH_FAIL_LIMIT = 3;
@@ -76,6 +77,7 @@ export class EvalKitExporter implements SpanExporter {
   private readonly serviceName?: string;
   private readonly debug: boolean;
   private readonly captureContent: boolean;
+  private readonly captureSecrets: boolean;
   private readonly mask?: MaskHook;
   private authFailures = 0;
   private disabled = false;
@@ -86,6 +88,7 @@ export class EvalKitExporter implements SpanExporter {
     serviceName?: string;
     debug?: boolean;
     captureContent?: boolean;
+    captureSecrets?: boolean;
     mask?: MaskHook;
   }) {
     this.url = `${opts.baseUrl.replace(/\/$/, "")}/v1/ingest`;
@@ -93,12 +96,14 @@ export class EvalKitExporter implements SpanExporter {
     this.serviceName = opts.serviceName;
     this.debug = opts.debug ?? false;
     this.captureContent = opts.captureContent ?? true;
+    this.captureSecrets = opts.captureSecrets ?? false;
     this.mask = opts.mask;
   }
 
   private redact(envelope: TraceEnvelope): TraceEnvelope | null {
     const stripped = this.captureContent ? envelope : stripContent(envelope);
-    return this.mask ? applyMask(this.mask, stripped) : stripped;
+    const scrubbed = this.captureSecrets ? stripped : scrubSecrets(stripped);
+    return this.mask ? applyMask(this.mask, scrubbed) : scrubbed;
   }
 
   private serviceNameFor(span: ReadableSpan): string | undefined {

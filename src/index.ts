@@ -53,6 +53,7 @@ export type { KoaMiddlewareOptions } from "./frameworks/koa/middleware.js";
 export type { HonoMiddlewareOptions } from "./frameworks/hono/middleware.js";
 export type { HapiPluginOptions } from "./frameworks/hapi/plugin.js";
 export { EvalKitClient } from "./core/client.js";
+export { scrubSecrets, isSecretKey } from "./core/secrets.js";
 export { EvalKitInterceptor } from "./frameworks/nestjs/interceptor.js";
 
 export { evaluate } from "./evaluate.js";

@@ -1,6 +1,6 @@
 {
   "name": "syntropylabs-evalkit",
-  "version": "0.2.15",
+  "version": "0.2.16",
   "description": "EvalKit TypeScript SDK \u2014 OpenTelemetry-based LLM observability and tracing",
   "license": "Apache-2.0",
   "author": "Syntropy Labs",
@@ -50,7 +50,7 @@
     "build": "tsup src/index.ts src/cli/index.ts --format cjs,esm --dts --clean --minify --treeshake --no-sourcemap",
     "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node test/autotrace.e2e.mjs && node test/host-otel.e2e.mjs && node test/explicit-provider.e2e.mjs && node test/redaction.e2e.mjs && node test/streaming-ttft.e2e.mjs && node test/stream-failure.e2e.mjs && node test/google-genai-thinking.e2e.mjs && node test/stream-usage-warning.e2e.mjs && node test/attr-spellings.e2e.mjs && node test/foreign-llm-counted.e2e.mjs && node tests/smoke.cjs && node test/feedback.e2e.mjs && node test/eval.e2e.mjs && node test/identity.e2e.mjs && node test/coding-cli.e2e.mjs && node test/coding-spans.e2e.mjs && node test/coding-cli-parity.e2e.mjs && node test/prompts.e2e.mjs",
+    "test": "npm run build && node test/autotrace.e2e.mjs && node test/host-otel.e2e.mjs && node test/explicit-provider.e2e.mjs && node test/redaction.e2e.mjs && node test/streaming-ttft.e2e.mjs && node test/stream-failure.e2e.mjs && node test/google-genai-thinking.e2e.mjs && node test/stream-usage-warning.e2e.mjs && node test/attr-spellings.e2e.mjs && node test/foreign-llm-counted.e2e.mjs && node tests/smoke.cjs && node test/feedback.e2e.mjs && node test/eval.e2e.mjs && node test/identity.e2e.mjs && node test/coding-cli.e2e.mjs && node test/coding-spans.e2e.mjs && node test/coding-cli-parity.e2e.mjs && node test/prompts.e2e.mjs && node test/secrets.e2e.mjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

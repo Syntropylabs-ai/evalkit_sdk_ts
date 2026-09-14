@@ -19,6 +19,7 @@ export interface SpanPipelineOptions {
   maxExportBatchSize: number;
   scheduledDelayMillis: number;
   captureContent: boolean;
+  captureSecrets: boolean;
   mask?: MaskHook;
 }
 
@@ -77,6 +78,7 @@ export function createSpanProcessor(opts: SpanPipelineOptions): SpanProcessor {
     serviceName: opts.serviceName,
     debug: opts.debug,
     captureContent: opts.captureContent,
+    captureSecrets: opts.captureSecrets,
     mask: opts.mask,
   });
   const batch = new BatchSpanProcessor(exporter, {

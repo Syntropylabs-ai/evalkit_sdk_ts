@@ -7,6 +7,8 @@ export const CAPTURE_CONTENT_ENV_VARS = [
   "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT",
 ] as const;
 
+export const CAPTURE_SECRETS_ENV_VARS = ["EVALKIT_CAPTURE_SECRETS"] as const;
+
 export const CONTENT_STRIPPED_ATTRIBUTE = "evalkit.content_captured";
 
 export const CONTENT_ATTRIBUTES: ReadonlySet<string> = new Set([
@@ -45,7 +47,7 @@ function envFlag(name: string): boolean | undefined {
   if (TRUTHY.has(value)) return true;
   if (FALSY.has(value)) return false;
   console.warn(
-    `[evalkit] ${name}=${JSON.stringify(raw)} is not a boolean; ignoring it and leaving content capture unchanged`
+    `[evalkit] ${name}=${JSON.stringify(raw)} is not a boolean; ignoring it and leaving the default in place`
   );
   return undefined;
 }
@@ -57,6 +59,15 @@ export function resolveCaptureContent(explicit?: boolean): boolean {
     if (flag !== undefined) return flag;
   }
   return true;
+}
+
+export function resolveCaptureSecrets(explicit?: boolean): boolean {
+  if (explicit !== undefined) return explicit;
+  for (const name of CAPTURE_SECRETS_ENV_VARS) {
+    const flag = envFlag(name);
+    if (flag !== undefined) return flag;
+  }
+  return false;
 }
 
 function stripAttributes(attrs: Record<string, unknown> | undefined): void {

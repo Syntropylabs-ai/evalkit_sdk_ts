@@ -86,6 +86,8 @@ export interface EvalKitOptions {
 
   captureContent?: boolean;
 
+  captureSecrets?: boolean;
+
   mask?: MaskHook;
 
   tracerProvider?: TracerProvider;

@@ -5,7 +5,8 @@ import type { EvalKitOptions, MaskHook } from "./types.js";
 import { detachSpanProcessor, resolveTracing } from "./provider.js";
 import type { TracingMode } from "./provider.js";
 import { errorAttrs } from "./errors-util.js";
-import { resolveCaptureContent } from "./redact.js";
+import { resolveCaptureContent, resolveCaptureSecrets } from "./redact.js";
+import { setCaptureSecrets } from "../utils/headers.js";
 import { bindIdentity, identityAttributes, identityFromAttributes, isIdentityEmpty } from "./identity.js";
 import type { Identity } from "./identity.js";
 
@@ -30,7 +31,7 @@ function toStartTraceOptions(
   };
 }
 
-const SDK_VERSION = "0.2.15";
+const SDK_VERSION = "0.2.16";
 
 const IO_MAX = 4096;
 
@@ -91,7 +92,10 @@ export class EvalKitClient {
       captureGlobalErrors: false,
       ...opts,
       captureContent: resolveCaptureContent(opts.captureContent),
+      captureSecrets: resolveCaptureSecrets(opts.captureSecrets),
     };
+
+    setCaptureSecrets(this.options.captureSecrets);
 
     const tracing = resolveTracing(
       {
@@ -102,6 +106,7 @@ export class EvalKitClient {
         maxExportBatchSize: this.options.maxExportBatchSize,
         scheduledDelayMillis: this.options.scheduledDelayMillis,
         captureContent: this.options.captureContent,
+        captureSecrets: this.options.captureSecrets,
         mask: this.options.mask,
       },
       this.options.tracerProvider

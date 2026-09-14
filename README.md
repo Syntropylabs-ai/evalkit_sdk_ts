@@ -491,6 +491,62 @@ tracing degrades instead of your app.
 When both controls are set, `captureContent` is applied first, so `mask` sees the already-stripped
 envelope.
 
+### Secrets are masked before export
+
+Every envelope goes through a secret scrubber before your `mask` hook runs and before anything
+leaves the process. It runs whether or not content capture is on: turning capture off removes
+strictly more, never less.
+
+**By key.** Any object key matching one of these, case-insensitively, as the whole key or as a
+dot/underscore/dash-delimited segment, has its value replaced by `"***"` — recursively through
+objects and arrays, and through attribute values that are JSON strings, which are parsed, scrubbed
+and re-serialized:
+
+`api_key` / `api-key` / `apikey`, `secret`, `token`, `password`, `passwd`, `authorization`,
+`credential`, `credentials`, `subscription_key` / `subscription-key`, `x-subscription-key`,
+`cookie`, `set-cookie`, `private_key`, `access_key`, `client_secret`.
+
+So `subscriptionKey`, `X-Subscription-Key`, `http.request.api_key` and `credentials.password` are
+all masked. `token` is the one word matched only as the whole key or the *final* segment, because it
+is also telemetry vocabulary: `prompt_token_count`, `gen_ai.server.time_to_first_token_ms`,
+`input_tokens` and `tokenizer` are metrics, not credentials, and masking them would blank out a
+dashboard column to protect nothing.
+Booleans and numbers under a matching key become `"***"` as well, so the value's shape never hints
+at what was there. `http.request.headers` and `http.response.headers` additionally go through the
+sensitive-header list (`authorization`, `cookie`, `set-cookie`, `x-api-key`, `api-key`,
+`x-auth-token`, `proxy-authorization`, `x-secret`, `x-access-token`, `x-subscription-key`,
+`subscription-key`, `token`, `password`).
+
+**By pattern.** Inside any string — attributes, event attributes, prompt, completion, status
+message — these are replaced by their own prefix followed by `***`:
+
+| Pattern | Becomes |
+| ---------------------------------- | ------------- |
+| `tk_live_[0-9a-f]{8,}`             | `tk_live_***` |
+| `tk_test_[0-9a-f]{8,}`             | `tk_test_***` |
+| `sk-[A-Za-z0-9_-]{16,}`            | `sk-***`      |
+| `Bearer\s+[A-Za-z0-9._~+/=-]{8,}`  | `Bearer ***`  |
+| `AKIA[0-9A-Z]{16}`                 | `AKIA***`     |
+| `ghp_[A-Za-z0-9]{20,}`             | `ghp_***`     |
+
+Strings that contain no secret are left byte for byte, JSON strings included — nothing is
+reformatted on the way through.
+
+Identity is deliberately **not** masked. Email addresses, user IDs, session IDs and device IDs pass
+through untouched: they are what the Users view, per-user cost and session replay are built on. A
+credential is never yours to lose; an identity is the product.
+
+To turn the scrubber off — debugging your own auth failure is the usual reason:
+
+```ts
+evalkit.init({ subscriptionKey: process.env.EVALKIT_SUBSCRIPTION_KEY!, captureSecrets: true });
+// or
+export EVALKIT_CAPTURE_SECRETS=1
+```
+
+With the scrubber off, credential headers are recorded exactly as they were sent; with it on (the
+default) their values are masked but the header names stay, so you can still see what was sent.
+
 ## Configuration
 
 | Option            | Description                                                    |
@@ -502,13 +558,15 @@ envelope.
 | `apiUrl`          | Override the control-plane endpoint (scenario / simulation).  |
 | `maxBodyBytes`    | Max captured HTTP body size (default 10 MB).                  |
 | `captureContent`  | Capture prompts/bodies/arguments (default on; see [Privacy](#privacy-content-capture-and-masking)). |
+| `captureSecrets`  | Record credentials instead of masking them (default off; see [Privacy](#privacy-content-capture-and-masking)). |
 | `mask`            | `(envelope) => envelope \| null` — rewrite or drop each span before export. |
 
 See the exported `EvalKitOptions` type for the full set (`appVersion`, `deviceId`,
 `debug`, batch tuning).
 
 Environment variables: `EVALKIT_API_URL` overrides the control-plane base for `Eval()`,
-feedback and prompts; `EVALKIT_QUIET=1` silences the evaluation-run link.
+feedback and prompts; `EVALKIT_QUIET=1` silences the evaluation-run link;
+`EVALKIT_CAPTURE_SECRETS=1` turns off secret masking.
 
 ## Coexisting with an OpenTelemetry setup you already have
 
