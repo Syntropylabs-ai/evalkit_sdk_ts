@@ -200,7 +200,7 @@ async function doctor(flags: Parsed["flags"], io: CliIo, store: ConfigStore): Pr
   }
   const saved = store.loadState();
   const { ok, detail } = await doctorRun.run(cfg, str(flags, "tenant") ?? cfg.tenant ?? undefined);
-  io.out(`round trip: ${ok ? "ok" : "failed"} (${detail}) → ${cfg.endpoint}/v1/traces`);
+  io.out(`round trip: ${ok ? "ok" : "failed"} (${detail}) → exporter ${cfg.endpoint}`);
   saved.doctor = { at: timestamp(), ok, detail };
   store.saveState(saved);
   const only = str(flags, "vendor");

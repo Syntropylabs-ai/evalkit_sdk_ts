@@ -93,7 +93,10 @@ async function read(cfg: SharedConfig, tenant: string, trace: string): Promise<D
   for (let attempt = 0; attempt < READ_ATTEMPTS; attempt++) {
     if (attempt) await sleep(READ_DELAY_MS);
     const { status, body, error } = await getJson(url, cfg.key);
-    if (status === 403) return { ok: false, detail: `read back forbidden for tenant "${tenant}"; pass --tenant <your tenant id>` };
+    if (status === 403) {
+      if (tenant === DEFAULT_TENANT) return { ok: false, detail: `read back forbidden at ${url}: this receiver predates the '${DEFAULT_TENANT}' alias; pass --tenant <your tenant id> or update the receiver` };
+      return { ok: false, detail: `read back forbidden at ${url}: the key belongs to a different tenant than '${tenant}'` };
+    }
     if (status === null || status < 200 || status >= 300) {
       detail = status !== null ? `HTTP ${status}` : error ?? "no response";
       continue;
@@ -103,7 +106,7 @@ async function read(cfg: SharedConfig, tenant: string, trace: string): Promise<D
     if (rows.length >= EXPECTED_SPANS && prompt) return { ok: true, detail: `${rows.length} spans merged, prompt present` };
     detail = `${rows.length} spans, prompt ${prompt ? "present" : "missing"}`;
   }
-  return { ok: false, detail };
+  return { ok: false, detail: `${detail} at ${url}` };
 }
 
 export async function run(cfg: SharedConfig, tenant?: string): Promise<DoctorResult> {
