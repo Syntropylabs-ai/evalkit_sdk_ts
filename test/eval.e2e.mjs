@@ -96,6 +96,8 @@ function route(path, body) {
     }
     if (server.mode === 'legacy') return [400, { statusCode: 400, message: 'rows should not be empty' }];
     if (server.mode === 'create-500') return [500, { statusCode: 500, message: 'boom' }];
+    if (server.mode === 'create-404') return [404, { statusCode: 404, message: `Evaluation rule(s) not found: ${RULE}` }];
+    if (server.mode === 'create-no-run-id') return [201, { url: 'https://app.test/x' }];
     const runId = `run_${server.runs.length + 1}`;
     server.runs.push(runId);
     server.rows.set(runId, new Map());
@@ -300,13 +302,23 @@ try {
 
   fresh();
   server.reset({ mode: 'legacy' });
-  const rowless = await Eval({ name: 'old', data: [{ input: 'q1', output: 'a1' }], evaluators: [RULE] });
-  assert.deepStrictEqual(server.paths(), ['/evaluation-runs', '/evaluation-runs']);
-  assert.strictEqual(rowless.jobId, 'job_1');
-  assert.strictEqual(rowless.url, null);
+  await assert.rejects(() => Eval({ name: 'old', data: [{ input: 'q1', output: 'a1' }], evaluators: [RULE] }), /Eval failed 400.*rows should not be empty/);
+  assert.deepStrictEqual(server.paths(), ['/evaluation-runs'], 'a 400 on create surfaces instead of degrading to the legacy shape');
+  server.reset();
+  const afterValidationError = await Eval({ name: 'again', data: [{ input: 'q1', output: 'a1' }], evaluators: [RULE] });
+  assert.deepStrictEqual(server.paths(), ['/evaluation-runs', '/evaluation-runs/run_1/rows', '/evaluation-runs/run_1/complete'], 'a validation error is not sticky');
+  assert.strictEqual(afterValidationError.runId, 'run_1');
+
+  server.reset({ mode: 'create-404' });
+  await assert.rejects(() => Eval({ name: 'missing-rule', data: [{ input: 'q1', output: 'a1' }], evaluators: [RULE] }), /Eval failed 404.*Evaluation rule\(s\) not found/);
+  assert.deepStrictEqual(server.paths(), ['/evaluation-runs'], 'a 404 on create is an error, not a legacy server');
+
+  server.reset({ mode: 'create-no-run-id' });
+  await assert.rejects(() => Eval({ name: 'odd', data: [{ input: 'q1', output: 'a1' }], evaluators: [RULE] }), /without a runId/);
+  assert.deepStrictEqual(server.paths(), ['/evaluation-runs']);
 
   fresh();
-  server.reset({ mode: 'legacy', legacyRespond: legacyPatterned });
+  server.reset({ mode: 'no-rows-endpoint', legacyRespond: legacyPatterned });
   const many = await Eval({
     name: 'multi', data: Array.from({ length: 450 }, (_, i) => ({ input: `q${i}`, output: 'o' })),
     evaluators: [RULE, lengthScorer], batchSize: 200, baselineJobId: BASELINE, gate: { minPassRate: 0.1 }, autoBaseline: true,

@@ -10,6 +10,37 @@ export const USER_ID_ATTRIBUTE = "evalkit.user_id";
 export const SESSION_ID_ATTRIBUTE = "evalkit.session_id";
 export const DEVICE_ID_ATTRIBUTE = "evalkit.device_id";
 
+/**
+ * The spellings the rest of the world uses for the same two ids. Every span carries both: our own
+ * receiver reads either, and an OTLP collector or another backend only understands these. A caller
+ * who sets the standard key by hand is understood too (see `sessionIdOf` / `userIdOf`).
+ */
+export const OTEL_SESSION_ID_ATTRIBUTE = "session.id";
+export const OTEL_USER_ID_ATTRIBUTE = "user.id";
+
+/** Session spellings accepted on a span, in the order the receiver resolves them. */
+const SESSION_KEYS = [SESSION_ID_ATTRIBUTE, OTEL_SESSION_ID_ATTRIBUTE, "conversation.id", "gen_ai.conversation.id", "session_id"] as const;
+const USER_KEYS = [USER_ID_ATTRIBUTE, OTEL_USER_ID_ATTRIBUTE, "enduser.id", "user_id"] as const;
+
+const firstString = (attributes: Record<string, unknown> | undefined, keys: readonly string[]): string | undefined => {
+  if (!attributes) return undefined;
+  for (const key of keys) {
+    const value = attributes[key];
+    if (typeof value === "string" && value !== "") return value;
+  }
+  return undefined;
+};
+
+/** The session a span names, whichever spelling its author used. */
+export function sessionIdOf(attributes?: Record<string, unknown>): string | undefined {
+  return firstString(attributes, SESSION_KEYS);
+}
+
+/** The end user a span names, whichever spelling its author used. */
+export function userIdOf(attributes?: Record<string, unknown>): string | undefined {
+  return firstString(attributes, USER_KEYS);
+}
+
 const MAX_TRACKED_TRACES = 4096;
 
 const byTraceId = new Map<string, Identity>();
@@ -30,8 +61,14 @@ export function isIdentityEmpty(identity: Identity): boolean {
 
 export function identityAttributes(identity: Identity): Record<string, string> {
   const attributes: Record<string, string> = {};
-  if (identity.userId) attributes[USER_ID_ATTRIBUTE] = identity.userId;
-  if (identity.sessionId) attributes[SESSION_ID_ATTRIBUTE] = identity.sessionId;
+  if (identity.userId) {
+    attributes[USER_ID_ATTRIBUTE] = identity.userId;
+    attributes[OTEL_USER_ID_ATTRIBUTE] = identity.userId;
+  }
+  if (identity.sessionId) {
+    attributes[SESSION_ID_ATTRIBUTE] = identity.sessionId;
+    attributes[OTEL_SESSION_ID_ATTRIBUTE] = identity.sessionId;
+  }
   if (identity.deviceId) attributes[DEVICE_ID_ATTRIBUTE] = identity.deviceId;
   return attributes;
 }

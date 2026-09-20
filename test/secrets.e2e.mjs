@@ -115,12 +115,136 @@ const UNTOUCHED_STRINGS = [
   'https://api.example.com/charge?id=7',
 ];
 
+const URL_CASES = [
+  [
+    'api_key in the query of http.url is masked and page is kept',
+    'http.url',
+    'https://api.example.com/v1/x?api_key=AKIAIOSFODNN7EXAMPLE&page=2',
+    'https://api.example.com/v1/x?api_key=***&page=2',
+  ],
+  [
+    'userinfo is masked',
+    'url.full',
+    'https://user:pass@api.example.com/v1/x',
+    'https://***@api.example.com/v1/x',
+  ],
+  [
+    'a key used as the username',
+    'url.full',
+    `https://${LIVE_KEY}@api.example.com/v1/x`,
+    'https://***@api.example.com/v1/x',
+  ],
+  [
+    'an unrelated query is untouched',
+    'http.url',
+    'https://api.example.com/search?q=hello&page=2',
+    'https://api.example.com/search?q=hello&page=2',
+  ],
+  [
+    'http.target is path and query without a scheme',
+    'http.target',
+    '/v1/x?access_token=abc&limit=5',
+    '/v1/x?access_token=***&limit=5',
+  ],
+  [
+    'url.query is a bare query string',
+    'url.query',
+    'sig=abc&se=2026-01-01',
+    'sig=***&se=2026-01-01',
+  ],
+  [
+    'server.address is a plain host',
+    'server.address',
+    'api.example.com',
+    'api.example.com',
+  ],
+  [
+    'a scheme-prefixed string under any key is a url',
+    'tool.args',
+    'wss://h/socket?token=abc',
+    'wss://h/socket?token=***',
+  ],
+  [
+    'query keys match case-insensitively and after url-decoding',
+    'http.url',
+    'https://h/p?api%5Fkey=a&API_KEY=b&Signature=c&sig=d&stream_key=e&key_id=keep&keyword=keep',
+    'https://h/p?api%5Fkey=***&API_KEY=***&Signature=***&sig=***&stream_key=***&key_id=keep&keyword=keep',
+  ],
+  [
+    'fragment parameters are masked like query parameters',
+    'http.url',
+    'https://app.example.com/cb#access_token=abc&token_type=bearer',
+    'https://app.example.com/cb#access_token=***&token_type=bearer',
+  ],
+  [
+    'flags, empty params and repeated equals are kept as they were',
+    'http.url',
+    'https://h/p?flag&token=abc&&x=1=2',
+    'https://h/p?flag&token=***&&x=1=2',
+  ],
+  [
+    'a url inside prose is free text, not a url',
+    'log.message',
+    'See https://example.com/x?token=abc for details',
+    'See https://example.com/x?token=abc for details',
+  ],
+  [
+    'prose around a url still gets pattern scrubbing',
+    'log.message',
+    `See https://example.com/x?key=${LIVE_KEY} for details`,
+    'See https://example.com/x?key=tk_live_*** for details',
+  ],
+];
+
+const NESTED_URL_CASES = [
+  [
+    'a url inside a json request body',
+    '{"url": "https://h/p?token=abc"}',
+    { url: 'https://h/p?token=***' },
+  ],
+  [
+    'a url inside a json array of objects',
+    '[{"endpoint": "https://h/p?api_key=abc"}, {"endpoint": "https://h/q?page=2"}]',
+    [{ endpoint: 'https://h/p?api_key=***' }, { endpoint: 'https://h/q?page=2' }],
+  ],
+];
+
+const OPERATION_CASES = [
+  [
+    'a subscription key in the operation query is pattern scrubbed',
+    `GET /v1/traces?key=${LIVE_KEY}`,
+    'GET /v1/traces?key=tk_live_***',
+  ],
+  [
+    'the operation is free text, so a plain query value is left alone',
+    'GET /v1/traces?key=abc123',
+    'GET /v1/traces?key=abc123',
+  ],
+  [
+    'an ordinary operation name is untouched',
+    'TracingService.findById',
+    'TracingService.findById',
+  ],
+];
+
+const PROSE_URL = 'See https://example.com/x?token=abc for details';
+
+const nestedUrlJson = (levels) => {
+  let leaf = { url: 'https://h/p?token=abc' };
+  for (let i = 0; i < levels; i += 1) leaf = { a: leaf };
+  return JSON.stringify(leaf);
+};
+
+const scrubEnvelope = (fields) =>
+  scrubSecrets({ traceId: 't', spanId: 's', spanType: 'function_call', createdAt: 'now', ...fields });
+
 const leakyAttributes = () => ({
   'function.result': JSON.stringify({ id: 'env_1', subscriptionKey: LIVE_KEY, ownerEmail: 'ada@example.com' }),
   'function.args': JSON.stringify([{ credentials: { subscriptionKey: LIVE_KEY, password: 'hunter2' } }, { email: 'ada@example.com' }]),
   'http.request.headers': JSON.stringify({ 'X-Subscription-Key': LIVE_KEY, authorization: 'Bearer eyJhbGciOiJIUzI1NiJ9.abc', 'content-type': 'application/json' }),
   'gen_ai.usage.input_tokens': 11,
   'url.full': 'https://api.example.com/charge',
+  'http.url': `https://api.example.com/v1/x?api_key=${LIVE_KEY}&page=2`,
 });
 
 async function collect(opts) {
@@ -138,7 +262,7 @@ async function collect(opts) {
   });
   assert.strictEqual(client.tracingMode, 'attached', 'each case needs its own pipeline so the envelopes cannot cross-contaminate');
 
-  const span = client.tracer.startSpan('TracingService.findById', {
+  const span = client.tracer.startSpan(`GET /v1/traces?key=${LIVE_KEY}`, {
     attributes: {
       'evalkit.span_type': 'function_call',
       'evalkit.prompt': `the environment key is ${LIVE_KEY}`,
@@ -192,11 +316,42 @@ try {
     );
   }
 
+  for (const [name, key, raw, expected] of URL_CASES) {
+    assert.deepStrictEqual(scrubAttrs({ [key]: raw }), { [key]: expected }, name);
+  }
+
+  for (const [name, key, , expected] of URL_CASES) {
+    if (key === 'log.message') continue;
+    assert.deepStrictEqual(scrubAttrs({ [key]: expected }), { [key]: expected }, `${name}: scrubbing twice is idempotent`);
+  }
+
+  for (const raw of ['https://api.example.com/charge', 'https://@h/p']) {
+    assert.deepStrictEqual(scrubAttrs({ 'url.full': raw }), { 'url.full': raw }, 'a url without a query or userinfo is left byte for byte');
+  }
+
+  for (const [name, raw, expected] of NESTED_URL_CASES) {
+    assert.deepStrictEqual(JSON.parse(scrubAttrs({ 'request.body': raw })['request.body']), expected, name);
+  }
+
+  const shallow = scrubAttrs({ 'request.body': nestedUrlJson(3) })['request.body'];
+  assert.ok(shallow.includes('token=***') && !shallow.includes('token=abc'), 'a url three objects deep is still masked');
+  const deep = nestedUrlJson(20);
+  assert.strictEqual(scrubAttrs({ 'request.body': deep })['request.body'], deep, 'the depth limit still applies to nested urls');
+
+  for (const [name, raw, expected] of OPERATION_CASES) {
+    assert.strictEqual(scrubEnvelope({ operation: raw }).operation, expected, name);
+  }
+
+  const prose = scrubEnvelope({ prompt: PROSE_URL, completion: `See https://example.com/x?key=${LIVE_KEY} for details` });
+  assert.strictEqual(prose.prompt, PROSE_URL, 'a url inside prompt prose is free text and is not query-masked');
+  assert.strictEqual(prose.completion, 'See https://example.com/x?key=tk_live_*** for details', 'prose still gets pattern scrubbing');
+
   const envelope = scrubSecrets({
     traceId: 't',
     spanId: 's',
     spanType: 'function_call',
     createdAt: 'now',
+    operation: `GET /v1/traces?key=${LIVE_KEY}`,
     prompt: `the environment key is ${LIVE_KEY}`,
     completion: 'done',
     statusMessage: `401 rejected for ${LIVE_KEY}`,
@@ -204,9 +359,17 @@ try {
     events: [{
       name: 'log',
       timestamp: 'now',
-      attributes: { 'log.message': `calling with key ${LIVE_KEY}`, subscriptionKey: LIVE_KEY, 'user.email': 'ada@example.com' },
+      attributes: {
+        'log.message': `calling with key ${LIVE_KEY}`,
+        subscriptionKey: LIVE_KEY,
+        'user.email': 'ada@example.com',
+        'http.url': `https://api.example.com/v1/x?api_key=${LIVE_KEY}`,
+      },
     }],
   });
+  assert.strictEqual(envelope.operation, 'GET /v1/traces?key=tk_live_***', 'the operation is a string surface too');
+  assert.strictEqual(envelope.attributes['http.url'], 'https://api.example.com/v1/x?api_key=***&page=2', 'query credentials are masked, the rest of the url stays');
+  assert.strictEqual(envelope.events[0].attributes['http.url'], 'https://api.example.com/v1/x?api_key=***', 'event urls are scrubbed like span urls');
   assert.strictEqual(envelope.prompt, 'the environment key is tk_live_***', 'the prompt is a string surface too');
   assert.strictEqual(envelope.completion, 'done');
   assert.strictEqual(envelope.statusMessage, '401 rejected for tk_live_***', 'a 401 message is where a key ends up next');
@@ -235,6 +398,8 @@ try {
   );
   assert.strictEqual(spans[0].tokensIn, 11, 'scrubbing must not disturb the metrics');
   assert.strictEqual(spans[0].attributes['url.full'], 'https://api.example.com/charge');
+  assert.strictEqual(spans[0].attributes['http.url'], 'https://api.example.com/v1/x?api_key=***&page=2', 'url query credentials are masked on the wire');
+  assert.strictEqual(spans[0].operation, 'GET /v1/traces?key=tk_live_***', 'the span name is the operation and is scrubbed on the wire');
   assert.strictEqual(
     spans[0].attributes['evalkit.content_captured'],
     undefined,

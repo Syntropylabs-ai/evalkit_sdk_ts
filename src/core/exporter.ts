@@ -3,7 +3,7 @@ import { ExportResultCode } from "@opentelemetry/core";
 import type { ExportResult } from "@opentelemetry/core";
 import type { TraceEnvelope, SpanEvent, BatchIngestRequest } from "./types.js";
 import { simByTraceId } from "./simulation.js";
-import { identityFor } from "./identity.js";
+import { identityFor, sessionIdOf, userIdOf } from "./identity.js";
 import { applyMask, stripContent } from "./redact.js";
 import { scrubSecrets } from "./secrets.js";
 import type { MaskHook } from "./redact.js";
@@ -258,8 +258,10 @@ export class EvalKitExporter implements SpanExporter {
       createdAt: new Date(startMs).toISOString(),
       environment: attrs["evalkit.environment"] as string | undefined,
       appVersion: attrs["evalkit.app_version"] as string | undefined,
-      userId: (attrs["evalkit.user_id"] as string | undefined) ?? identity.userId,
-      sessionId: (attrs["evalkit.session_id"] as string | undefined) ?? identity.sessionId,
+      // Either spelling: a span written by hand with `session.id` (the OpenTelemetry one) has to
+      // group into a session exactly like one written through setUser().
+      userId: userIdOf(attrs) ?? identity.userId,
+      sessionId: sessionIdOf(attrs) ?? identity.sessionId,
       deviceId: (attrs["evalkit.device_id"] as string | undefined) ?? identity.deviceId,
       sdkVersion: attrs["evalkit.sdk_version"] as string | undefined,
     };

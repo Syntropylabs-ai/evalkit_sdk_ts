@@ -472,18 +472,9 @@ async function runAppended(
   rows: RunRows,
 ): Promise<EvalResult | null> {
   const created = await api.post("/evaluation-runs", spec.createBody());
-  if (!created.ok) {
-    if (created.status === 404 || (created.status === 400 && /rows/i.test(created.text))) {
-      rowsEndpointSupport.set(client, false);
-      return null;
-    }
-    throw failure(created);
-  }
+  if (!created.ok) throw failure(created);
   const runId = created.body.runId as string | undefined;
-  if (!runId) {
-    rowsEndpointSupport.set(client, false);
-    return null;
-  }
+  if (!runId) throw new Error("[evalkit] POST /evaluation-runs answered without a runId");
   const url = (created.body.url as string | undefined) ?? null;
   if (url) announce(url);
 

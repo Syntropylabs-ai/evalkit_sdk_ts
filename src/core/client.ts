@@ -31,7 +31,7 @@ function toStartTraceOptions(
   };
 }
 
-const SDK_VERSION = "0.2.16";
+const SDK_VERSION = "0.2.17";
 
 const IO_MAX = 4096;
 

@@ -250,7 +250,7 @@ const result = await Eval({
   hyperparameters: { model: "gpt-5-mini", promptVersion: "v12", temperature: 0.2 },
 });
 console.log(result.url);                       // printed once as the run starts, too
-if (result.passed === false) process.exit(1);
+if (result.passed !== true) process.exit(result.passed === false ? 1 : 2);   // null = undecided: fail closed
 console.log(result.passRate, result.overallScores, result.comparison, result.localScores);
 ```
 
@@ -282,15 +282,80 @@ in the run results with evaluator source `local`. Return a number, a boolean (sc
 ### Notes
 
 - `result.passed` is the gate verdict: `true` / `false`, or `null` when no gate was
-  set or a check could not be decided. `averageScore` and `passRate` are `null` when
-  undefined — never 0.
+  set or a check could not be decided (no comparable baseline, a `perMetricMinScore`
+  metric the run never scored, every row errored). Gate on `passed !== true`, not on
+  `passed === false`: the latter lets an undecided run through. `averageScore` and
+  `passRate` are `null` when undefined — never 0.
 - `result.localScores[label]` is one score per row, `null` preserved.
 - Other options: `judgeModelConfigId`, `timeoutMs` (default 600 s per request),
   `apiUrl`.
-- Against a deployment older than the append endpoints the SDK falls back to the
-  previous single-call behaviour: one job per batch (`result.jobIds`), aggregates
-  rolled up client-side, and `gateResult` / `comparison` `null` above one batch. The
-  fallback is detected once per client, not once per batch.
+- Against a deployment older than the append endpoints — `POST
+  /evaluation-runs/{runId}/rows` answers 404 — the SDK falls back to the previous
+  single-call behaviour: one job per batch (`result.jobIds`), aggregates rolled up
+  client-side, and `gateResult` / `comparison` `null` above one batch. The fallback is
+  detected once per client, not once per batch. A 400 or 404 from `POST
+  /evaluation-runs` itself (a validation error, an evaluator id that does not exist) is
+  thrown as `Eval failed <status>: <body>` and never mistaken for an old server.
+
+### CI: `npx evalkit eval`
+
+The same run from the command line, with the verdict as the exit code — so a pipeline
+step fails when the gate fails **and** when it cannot be decided.
+
+```bash
+npx evalkit eval run eval.json                      # a JSON config
+npx evalkit eval run evals/checkout.mjs             # a module: default export = Eval options
+npx evalkit eval run evals/checkout.mjs --export smoke --json
+npx evalkit eval gate <runId>                       # re-read the gate of a run made elsewhere
+```
+
+| Exit | Meaning |
+|---|---|
+| `0` | `gate.passed === true` |
+| `1` | `gate.passed === false` |
+| `2` | undecided: `gate.passed === null`, or the run had no gate. Pass `--allow-undecided` to exit `0` instead. |
+| `3` | the run could not be made or read (bad config, HTTP error, no key) |
+
+`eval.json` carries the `Eval()` options by their TypeScript names (`name`, `evaluators`,
+`gate`, `judgeModel`, `baselineJobId`, `autoBaseline`, `hyperparameters`, `batchSize`,
+`timeoutMs`) plus either inline `data` or `dataFile` — a `.json` array or a `.jsonl` file
+of rows, resolved relative to the config — with the outputs already present:
+
+```json
+{
+  "name": "checkout · ${GITHUB_SHA}",
+  "dataFile": "rows.jsonl",
+  "evaluators": ["665f0c1234567890abcdef12"],
+  "judgeModel": "gpt-5-mini",
+  "autoBaseline": true,
+  "gate": { "minPassRate": 0.9, "maxRegressionsVsBaseline": 0 }
+}
+```
+
+A module target is a `.mjs` / `.cjs` / `.js` file (compile TypeScript first, or run under
+a loader such as `NODE_OPTIONS=--import=tsx`) whose default export — or the export named
+by `--export` — is an options object, a function returning one (sync or async; this is
+where a `task` and local scorers live), or an already finished `EvalResult` when the
+function runs `Eval()` itself. The key comes from `--key`, `EVALKIT_API_KEY` or the
+config `evalkit coding install` stored; the API base from `--api-url`, `EVALKIT_API_URL`
+or `https://api.syntropylabs.ai`.
+
+The command prints the run link, the pass rate and average score, the per-metric
+averages, one table row per gate check (name · threshold · actual · passed/failed/
+undecided) and the verdict with the exit code it maps to. `--json` prints one object
+instead — `{ runId, jobId, url, name, totalRows, erroredRows, indeterminateRows,
+passRate, averageScore, overallScores, gate: { passed, checks, evaluatedAt }, verdict }` —
+to paste into a job summary or parse with `jq`.
+
+```yaml
+- run: npx evalkit eval run eval.json --json > eval-result.json
+  env:
+    EVALKIT_API_KEY: ${{ secrets.EVALKIT_API_KEY }}
+```
+
+`eval gate <runId>` reads `GET /evaluation-runs/{runId}` with the same key and applies
+the same exit codes, for pipelines that run the evaluation in one job and decide in
+another.
 
 ## Feedback and rewards
 
@@ -390,7 +455,7 @@ also appear in the Tracing dashboard.
 
 ## Coding agents (Claude Code · Codex · Gemini CLI · Cursor · Windsurf · OpenCode)
 
-The package ships an `evalkit` command (`npx evalkit …`) that points a coding agent's own telemetry at your EvalKit environment so its sessions appear as one trace per turn — the main agent, every subagent and everything they did. The command imports nothing from the tracing runtime:
+The package ships an `evalkit` command (`npx evalkit …`) that points a coding agent's own telemetry at your EvalKit environment so its sessions appear as one trace per turn — the main agent, every subagent and everything they did. The `coding` commands import nothing from the tracing runtime (only `evalkit eval` loads the SDK, on demand):
 
 ```bash
 npx evalkit coding install --vendor claude-code --key tk_live_...
@@ -517,8 +582,8 @@ sensitive-header list (`authorization`, `cookie`, `set-cookie`, `x-api-key`, `ap
 `x-auth-token`, `proxy-authorization`, `x-secret`, `x-access-token`, `x-subscription-key`,
 `subscription-key`, `token`, `password`).
 
-**By pattern.** Inside any string — attributes, event attributes, prompt, completion, status
-message — these are replaced by their own prefix followed by `***`:
+**By pattern.** Inside any string — attributes, event attributes, operation, prompt, completion,
+status message — these are replaced by their own prefix followed by `***`:
 
 | Pattern | Becomes |
 | ---------------------------------- | ------------- |
@@ -531,6 +596,17 @@ message — these are replaced by their own prefix followed by `***`:
 
 Strings that contain no secret are left byte for byte, JSON strings included — nothing is
 reformatted on the way through.
+
+**By URL.** `http.url`, `url.full`, `http.target`, `url.query` and `server.address` are always read
+as URLs, and so is any other attribute value — including values nested inside JSON strings — that is
+a single `http://`, `https://`, `ws://` or `wss://` URL and nothing else. Userinfo is masked
+(`https://user:pass@host/x` becomes `https://***@host/x`), and every query or fragment parameter
+whose key is on the by-key list, on the sensitive-header list, or is `key`, `sig` or `signature` as
+the whole key or its final segment has its value replaced by `***`; keys are matched
+case-insensitively after URL-decoding. Every other parameter keeps its value and position, so
+`?api_key=AKIA…&page=2` becomes `?api_key=***&page=2` and `?q=hello` is untouched. A URL inside
+prose — a prompt, a completion, an operation name, a log line — is free text and only goes through
+the pattern list above.
 
 Identity is deliberately **not** masked. Email addresses, user IDs, session IDs and device IDs pass
 through untouched: they are what the Users view, per-user cost and session replay are built on. A

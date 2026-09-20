@@ -3,11 +3,14 @@ import * as doctorRun from "./doctor.js";
 import { MalformedFile } from "./files.js";
 import { runHook } from "./hook.js";
 import { ClaudeCodeInstaller, VENDORS, installerFor, type InstallOptions, type VendorStatus } from "./vendors.js";
+import { gateEval, runEval, type EvalFlags, type SdkModule } from "./evaluation.js";
 
 export { shellWord } from "./vendors.js";
 export { buildRecords } from "./hook.js";
 export { events as hookEvents } from "./turns.js";
 export { OPENCODE_PLUGIN_SOURCE, PLUGIN_SOURCE_SHA256 } from "../opencode/plugin.js";
+export { EXIT_ERROR, EXIT_FAILED, EXIT_PASSED, EXIT_UNDECIDED, exitCode, renderGateTable, reportFromBody, verdict } from "./evaluation.js";
+export type { GateCheck, GateResult, RunReport, SdkModule, Verdict } from "./evaluation.js";
 
 const HOOK_VENDORS = ["claude-code", "cursor", "windsurf"] as const;
 
@@ -44,7 +47,10 @@ const USAGE = `usage:
   evalkit coding status
   evalkit coding doctor [--vendor <name>] [--tenant <id>]
   evalkit coding uninstall --vendor <name> [--purge] [--dry-run]
-  evalkit coding hook --vendor ${HOOK_VENDORS.join("|")} --event <event>`;
+  evalkit coding hook --vendor ${HOOK_VENDORS.join("|")} --event <event>
+  evalkit eval run <eval.json | module.mjs> [--export <name>] [--key <key>] [--api-url <url>] [--json] [--allow-undecided]
+  evalkit eval gate <runId> [--key <key>] [--api-url <url>] [--json] [--allow-undecided]
+    exit 0 = gate passed, 1 = failed, 2 = undecided (0 with --allow-undecided), 3 = could not run`;
 
 export interface CliIo {
   out: (line: string) => void;
@@ -52,6 +58,26 @@ export interface CliIo {
   home?: string;
   cwd?: string;
   binary?: string;
+  sdk?: () => Promise<SdkModule>;
+}
+
+function evalFlags(flags: Parsed["flags"]): EvalFlags {
+  return {
+    key: str(flags, "key"),
+    apiUrl: str(flags, "api-url"),
+    json: flags.json === true,
+    allowUndecided: flags["allow-undecided"] === true,
+    exportName: str(flags, "export"),
+  };
+}
+
+async function evaluation(positional: string[], flags: Parsed["flags"], io: CliIo): Promise<number> {
+  const [, action, target] = positional;
+  if ((action !== "run" && action !== "gate") || !target) {
+    io.err(USAGE);
+    return 2;
+  }
+  return action === "run" ? runEval(target, evalFlags(flags), io) : gateEval(target, evalFlags(flags), io);
 }
 
 function str(flags: Parsed["flags"], name: string): string | undefined {
@@ -219,6 +245,7 @@ async function doctor(flags: Parsed["flags"], io: CliIo, store: ConfigStore): Pr
 
 export async function main(argv: string[], io: CliIo = { out: console.log, err: console.error }): Promise<number> {
   const { positional, flags } = parseArgs(argv);
+  if (positional[0] === "eval") return evaluation(positional, flags, io);
   const store = new ConfigStore(io.home);
   if (positional[0] !== "coding") {
     io.err(USAGE);
