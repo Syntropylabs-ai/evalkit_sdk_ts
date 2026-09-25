@@ -443,8 +443,17 @@ server.listen(0, async () => {
 
     const oa = captured.filter((e) => e.spanType === "llm_call" && e.provider === "openai");
     assert.ok(oa.length >= 1, "openai llm_call captured");
+    const { version } = require("../package.json");
+    assert.ok(oa.every((e) => e.sdkVersion === version), "an instrumented llm_call reports the SDK version");
     const toolSpans = captured.filter((e) => e.spanType === "tool_call");
-    assert.ok(toolSpans.some((t) => t.operation === "search"), "openai tool_call span emitted");
+    // A tool the model asks for is an event on its llm span; the app's own execution of it is the span.
+    const requestedTool = (name) =>
+      captured
+        .filter((e) => e.spanType === "llm_call")
+        .flatMap((e) => e.events ?? [])
+        .find((ev) => ev.name === "gen_ai.tool.call" && ev.attributes["gen_ai.tool.name"] === name);
+    assert.ok(requestedTool("search"), "openai requested tool recorded as an llm_call event");
+    assert.ok(!toolSpans.some((t) => t.operation === "search"), "a requested client-side tool is not also a tool_call span");
 
     const mcpSpan = toolSpans.find((t) => t.operation === "add");
     assert.ok(mcpSpan, "mcp tool_call span emitted");
@@ -459,7 +468,7 @@ server.listen(0, async () => {
     assert.strictEqual(converseSpan.completion, "converse ok", "converse completion captured");
     assert.strictEqual(converseSpan.tokensIn, 4, "converse input tokens");
     assert.strictEqual(converseSpan.tokensOut, 2, "converse output tokens");
-    assert.ok(toolSpans.some((t) => t.operation === "get_time"), "converse toolUse block emitted a tool_call span");
+    assert.ok(requestedTool("get_time"), "converse toolUse block recorded as an llm_call event");
 
     const malformedSpan = bedrockSpans.find((e) => e.operation === "converse" && e.model === "cohere.command-r-v1:0");
     assert.ok(malformedSpan, "malformed converse output still ends and exports its span");
@@ -475,9 +484,9 @@ server.listen(0, async () => {
     assert.deepStrictEqual(converseStreamSpan.attributes["gen_ai.response.finish_reasons"], ["tool_use"], "converse_stream stop reason from messageStop");
     assert.strictEqual(converseStreamSpan.attributes["gen_ai.streaming"], true, "converse_stream marked streaming");
     assert.strictEqual(converseStreamSpan.attributes["gen_ai.response.thinking"], "let me think", "converse_stream reasoningContent deltas accumulated");
-    const streamToolSpan = toolSpans.find((t) => t.operation === "lookup_city");
-    assert.ok(streamToolSpan, "converse_stream toolUse deltas emitted a tool_call span");
-    assert.strictEqual(streamToolSpan.attributes["tool.arguments"], '{"city":"paris"}', "converse_stream toolUse partial JSON reassembled");
+    const streamTool = requestedTool("lookup_city");
+    assert.ok(streamTool, "converse_stream toolUse deltas recorded as an llm_call event");
+    assert.strictEqual(streamTool.attributes["gen_ai.tool.call.arguments"], '{"city":"paris"}', "converse_stream toolUse partial JSON reassembled");
 
     const abandonedSpan = bedrockSpans.find((e) => e.operation === "converse_stream" && e.model === "meta.llama3-70b-instruct-v1:0");
     assert.ok(abandonedSpan, "abandoned converse_stream span still ended and exported");
@@ -491,7 +500,7 @@ server.listen(0, async () => {
     assert.strictEqual(invokeSpan.tokensIn, 9, "invoke_model claude input tokens");
     assert.strictEqual(invokeSpan.tokensOut, 4, "invoke_model claude output tokens");
     assert.strictEqual(invokeSpan.attributes["gen_ai.request.max_tokens"], 128, "invoke_model claude max_tokens");
-    assert.ok(toolSpans.some((t) => t.operation === "sum_two"), "invoke_model claude tool_use emitted a tool_call span");
+    assert.ok(requestedTool("sum_two"), "invoke_model claude tool_use recorded as an llm_call event");
 
     const invokeStreamSpan = bedrockSpans.find((e) => e.operation === "invoke_model_with_response_stream");
     assert.ok(invokeStreamSpan, "invoke_model_with_response_stream span emitted");

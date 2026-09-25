@@ -1,4 +1,4 @@
-import { SpanKind, context as otelContext, trace } from "@opentelemetry/api";
+import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opentelemetry/api";
 import type { Span } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../core/client.js";
 import { recordSimToolCall } from "../../core/simulation.js";
@@ -156,6 +156,12 @@ export function fromLangChainResult(output: any, _ts?: string): NormalizedToolCa
   return out;
 }
 
+/**
+ * Records the tools a model asked for as `gen_ai.tool.call` events on its llm span. A requested
+ * call becomes a `tool_call` span only when the provider ran it and returned the result (a hosted
+ * tool such as web search): a client-side tool runs in the app, which traces it itself, and a
+ * second span for the same call would count every tool twice.
+ */
 export function emitToolCalls(client: EvalKitClient, llmSpan: Span, calls: NormalizedToolCall[]): void {
   if (!calls.length) return;
   const traceId = llmSpan.spanContext().traceId;
@@ -170,6 +176,7 @@ export function emitToolCalls(client: EvalKitClient, llmSpan: Span, calls: Norma
     if (c.result != null) eventAttrs["gen_ai.tool.call.result"] = c.result;
     try { llmSpan.addEvent("gen_ai.tool.call", eventAttrs); } catch {  }
     try { recordSimToolCall(traceId, c.name, safeParse(c.argsJson)); } catch {  }
+    if (c.result == null) continue;
     try {
       const toolSpan = client.tracer.startSpan(
         c.name,
@@ -180,11 +187,12 @@ export function emitToolCalls(client: EvalKitClient, llmSpan: Span, calls: Norma
             ...eventAttrs,
             "tool.name": c.name,
             "tool.arguments": c.argsJson,
-            ...(c.result != null ? { "tool.result": c.result } : {}),
+            "tool.result": c.result,
           },
         },
         ctx,
       );
+      toolSpan.setStatus({ code: SpanStatusCode.OK });
       toolSpan.end();
     } catch {  }
   }

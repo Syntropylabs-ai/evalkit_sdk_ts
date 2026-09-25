@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.1 — 2026-09-26
+
+### Fixed
+- A tool call the model only requested is recorded as a `gen_ai.tool.call` event on its model-call
+  span, as the Python SDK does, and no longer also as a `tool_call` span. The tool your code runs
+  (through `traceTool`) was counted twice: once for the request and once for the run. A
+  `tool_call` span is still recorded when the provider ran the tool itself and returned its result.
+- Model-call spans and the other spans the SDK's instrumentation starts report the SDK version
+  (`sdkVersion`), not just the spans an app opens with `startTrace` or `startSpan`.
+
 ## 0.3.0 — 2026-09-26
 
 Sessions and named agents. Traces now group into conversations and agents on the dashboard

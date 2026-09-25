@@ -265,7 +265,7 @@ export class EvalKitExporter implements SpanExporter {
       sessionId: sessionIdOf(attrs) ?? scope.sessionId,
       deviceId: (attrs["evalkit.device_id"] as string | undefined) ?? scope.deviceId,
       agentName,
-      sdkVersion: attrs["evalkit.sdk_version"] as string | undefined,
+      sdkVersion: (attrs["evalkit.sdk_version"] as string | undefined) ?? evalkitScopeVersion(span),
     };
 
     const sim = simByTraceId.get(ctx.traceId);
@@ -281,6 +281,16 @@ export class EvalKitExporter implements SpanExporter {
 }
 
 const COUNT_FOREIGN_LLM = process.env.EVALKIT_COUNT_FOREIGN_LLM === "1" || process.env.EVALKIT_COUNT_FOREIGN_LLM === "true";
+
+/**
+ * Only the spans an app opens by hand are stamped with `evalkit.sdk_version`; the ones the SDK's
+ * instrumentation starts (model calls, requested tools) say which release produced them through the
+ * tracer's scope version. Spans from other OpenTelemetry libraries keep none.
+ */
+function evalkitScopeVersion(span: ReadableSpan): string | undefined {
+  const scope = (span as any).instrumentationScope ?? (span as any).instrumentationLibrary;
+  return scope?.name === "evalkit" && typeof scope.version === "string" ? scope.version : undefined;
+}
 
 function isForeignGenAi(attrs: Record<string, unknown>): boolean {
   if (attrs["evalkit.span_type"] !== undefined) return false;
