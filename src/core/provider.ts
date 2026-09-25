@@ -10,6 +10,7 @@ import type { ReadableSpan, Span } from "@opentelemetry/sdk-trace-base";
 import { EvalKitExporter } from "./exporter.js";
 import type { MaskHook } from "./redact.js";
 import { activePromptRef, promptAttributes } from "./prompt-context.js";
+import { captureStartScope } from "./identity.js";
 
 export interface SpanPipelineOptions {
   baseUrl: string;
@@ -47,6 +48,11 @@ class ContextStampingProcessor implements SpanProcessor {
   constructor(private readonly inner: SpanProcessor) {}
 
   onStart(span: Span, parentContext: OtelContext): void {
+    try {
+      captureStartScope(span, parentContext);
+    } catch {
+
+    }
     if (span.attributes["evalkit.span_type"] === "llm_call") {
       const ref = activePromptRef(parentContext);
       if (ref) {

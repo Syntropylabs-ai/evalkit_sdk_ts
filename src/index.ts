@@ -6,8 +6,14 @@ import { Eval as _Eval } from "./eval.js";
 import { getPrompt as _getPrompt, clearPromptCache, withPrompt, currentPrompt, Prompt } from "./prompts.js";
 import { EvalKitClient } from "./core/client.js";
 import type { StartTraceOptions } from "./core/client.js";
-import { currentIdentity, setUser as _setUser } from "./core/identity.js";
-import type { Identity } from "./core/identity.js";
+import {
+  currentAgentName,
+  currentIdentity,
+  setAgent as _setAgent,
+  setUser as _setUser,
+  withSession as _withSession,
+} from "./core/identity.js";
+import type { Identity, SessionScope } from "./core/identity.js";
 import { extractTraceparent as _extractTraceparentHelper } from "./core/context.js";
 import { patchOpenAI } from "./instrumentation/llm/openai/index.js";
 import { patchAnthropic } from "./instrumentation/llm/anthropic/index.js";
@@ -61,7 +67,7 @@ export type { OfflineEvalInput, OfflineEvalResult, OfflineMetric } from "./evalu
 
 export { EvalResult } from "./eval.js";
 export type { EvalOptions, EvalRow, EvalRowResult, EvalGate, EvalSummary, LocalEvaluator, LocalScore, LocalScoreValue } from "./eval.js";
-export type { Identity } from "./core/identity.js";
+export type { Identity, SessionScope } from "./core/identity.js";
 export type { StartTraceOptions } from "./core/client.js";
 export type { FeedbackOptions, FeedbackResult, FeedbackKind } from "./feedback.js";
 export { Prompt, withPrompt, currentPrompt, compileTemplate, variablesOf } from "./prompts.js";
@@ -251,6 +257,20 @@ export function setUser(identity?: Identity | null): void {
 
 export function currentUser(): Identity {
   return currentIdentity();
+}
+
+/** Names the agent every span from here on belongs to; `null` clears it. Scoped like setUser. */
+export function setAgent(agentName?: string | null): void {
+  _setAgent(agentName);
+}
+
+export function currentAgent(): string | undefined {
+  return currentAgentName();
+}
+
+/** Runs `fn` with `sessionId` (and `userId`) in force for every span it starts, then restores the previous scope. */
+export function withSession<T>(session: SessionScope, fn: () => T): T {
+  return _withSession(session, fn);
 }
 
 export async function flush(): Promise<void> {
@@ -492,6 +512,9 @@ export default {
   startSpan,
   setUser,
   currentUser,
+  setAgent,
+  currentAgent,
+  withSession,
   traceFunction,
   traceTool,
   traceObject,

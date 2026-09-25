@@ -39,6 +39,8 @@ export interface TraceEnvelope {
   userId?: string;
   sessionId?: string;
   deviceId?: string;
+  /** The named agent this span belongs to (setAgent / startTrace agentName / span attribute). */
+  agentName?: string;
   traceProjectId?: string;
   sdkVersion?: string;
   isSimulation?: boolean;

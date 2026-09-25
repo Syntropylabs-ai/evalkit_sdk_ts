@@ -198,16 +198,71 @@ setUser(null);                      // clears
 
 - Called inside a trace (an active span — a framework middleware, `startTrace`,
   `withTrace`), `setUser` binds the identity to that trace only, so a request never
-  leaks its user into another one. Called with no active span it sets a process-wide
-  default, which is what you want in a script or a worker.
+  leaks its user into another one. Called with no active span it applies to the
+  current async context from that point on: the rest of a script or worker, or the
+  rest of one request's handler. On Node this is an `AsyncLocalStorage`, so two
+  requests served concurrently never overwrite each other; runtimes without one
+  (browsers, some edge workers) fall back to a single process-wide value.
 - Every span in the trace inherits the ids, including spans from third-party
-  OpenTelemetry instrumentation, because they are resolved per trace at export time.
+  OpenTelemetry instrumentation: the ambient ids are captured when each span starts,
+  the trace's ids are applied when it is exported.
 - `startTrace(name, attributes)` still works: a plain record of attributes is treated
-  as attributes, and the `evalkit.user_id` / `evalkit.session_id` /
-  `evalkit.device_id` spellings are picked up as identity as well.
-- Precedence: what a span carries itself, then the trace's identity, then the process
-  default, then the `deviceId` given to `init()`.
+  as attributes, and any accepted spelling (below) is picked up as the trace's identity,
+  so its child spans carry it too.
+- Precedence, per field: what a span carries itself (any spelling), then the nearest
+  `startSpan` above it that named an id in its attributes, then the trace's identity
+  (`startTrace` options or attributes, `setUser` inside the trace), then the scope in
+  force where the span started (`withSession`, `setUser` outside a span), then the
+  `deviceId` given to `init()`.
 - `currentUser()` returns what is in effect right now.
+
+Accepted attribute spellings, first match wins:
+
+| Id | Keys |
+|---|---|
+| session | `evalkit.session_id`, `session.id`, `conversation.id`, `gen_ai.conversation.id`, `session_id` |
+| user | `evalkit.user_id`, `user.id`, `enduser.id`, `user_id` |
+| agent | `evalkit.agent_name`, `gen_ai.agent.name`, `agent.name` |
+
+### Sessions
+
+Wrap one conversation turn so every span it starts groups into the session, then the
+previous scope comes back:
+
+```ts
+import { withSession } from "syntropylabs-evalkit";
+
+await withSession({ sessionId: "conv_55", userId: "u_8123" }, async () => {
+  await agent.reply(message);
+});
+```
+
+A trace without a session id stays sessionless; it is still recorded and evaluable on
+its own.
+
+### Agents
+
+Name the agent your spans belong to. The name lands on the envelope as `agentName` and
+on every span as both `evalkit.agent_name` and `gen_ai.agent.name`:
+
+```ts
+import { setAgent, startTrace, startSpan, withTrace } from "syntropylabs-evalkit";
+
+setAgent("support-bot");                 // everything after this, scoped like setUser
+setAgent(null);                          // clears
+
+const turn = startTrace("chat-turn", { agentName: "support-bot" }); // this trace only
+await withTrace(turn.ctx, async () => {
+  // Spans started inside this one belong to the sub-agent.
+  const research = startSpan("research", { "gen_ai.agent.name": "researcher" });
+  await withTrace(research.ctx, () => runResearcher());
+  research.end();
+});
+turn.end();
+```
+
+Agent versions are not declared; they stay the automatic fingerprint and are shown
+under the agent's name.
 
 Without these ids a trace is still recorded — it just cannot be grouped into a session
 or attributed to a user.

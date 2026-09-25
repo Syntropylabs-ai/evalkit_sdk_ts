@@ -3,7 +3,7 @@ import { ExportResultCode } from "@opentelemetry/core";
 import type { ExportResult } from "@opentelemetry/core";
 import type { TraceEnvelope, SpanEvent, BatchIngestRequest } from "./types.js";
 import { simByTraceId } from "./simulation.js";
-import { identityFor, sessionIdOf, userIdOf } from "./identity.js";
+import { agentAttributes, agentNameOf, scopeForSpan, sessionIdOf, userIdOf } from "./identity.js";
 import { applyMask, stripContent } from "./redact.js";
 import { scrubSecrets } from "./secrets.js";
 import type { MaskHook } from "./redact.js";
@@ -224,7 +224,8 @@ export class EvalKitExporter implements SpanExporter {
       attributes: e.attributes as Record<string, string | number | boolean>,
     }));
 
-    const identity = identityFor(ctx.traceId);
+    const scope = scopeForSpan(span, ctx.traceId);
+    const agentName = agentNameOf(attrs) ?? scope.agentName;
     const foreignLlm = !COUNT_FOREIGN_LLM && isForeignGenAi(attrs);
     const cacheReadTokens = foreignLlm ? undefined : firstTokenCount(attrs, CACHE_READ_KEYS);
     const cacheCreationTokens = foreignLlm ? undefined : firstTokenCount(attrs, CACHE_CREATION_KEYS);
@@ -254,15 +255,16 @@ export class EvalKitExporter implements SpanExporter {
       startTime: new Date(startMs).toISOString(),
       endTime: new Date(endMs).toISOString(),
       events: events.length > 0 ? events : undefined,
-      attributes: buildAttributes(attrs),
+      attributes: { ...buildAttributes(attrs), ...agentAttributes(agentName) },
       createdAt: new Date(startMs).toISOString(),
       environment: attrs["evalkit.environment"] as string | undefined,
       appVersion: attrs["evalkit.app_version"] as string | undefined,
-      // Either spelling: a span written by hand with `session.id` (the OpenTelemetry one) has to
-      // group into a session exactly like one written through setUser().
-      userId: userIdOf(attrs) ?? identity.userId,
-      sessionId: sessionIdOf(attrs) ?? identity.sessionId,
-      deviceId: (attrs["evalkit.device_id"] as string | undefined) ?? identity.deviceId,
+      // A span's own attribute, in any spelling, wins: one written by hand with `session.id` (the
+      // OpenTelemetry key) has to group into a session exactly like one written through setUser().
+      userId: userIdOf(attrs) ?? scope.userId,
+      sessionId: sessionIdOf(attrs) ?? scope.sessionId,
+      deviceId: (attrs["evalkit.device_id"] as string | undefined) ?? scope.deviceId,
+      agentName,
       sdkVersion: attrs["evalkit.sdk_version"] as string | undefined,
     };
 

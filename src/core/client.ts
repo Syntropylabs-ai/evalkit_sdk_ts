@@ -7,14 +7,24 @@ import type { TracingMode } from "./provider.js";
 import { errorAttrs } from "./errors-util.js";
 import { resolveCaptureContent, resolveCaptureSecrets } from "./redact.js";
 import { setCaptureSecrets } from "../utils/headers.js";
-import { bindIdentity, identityAttributes, identityFromAttributes, isIdentityEmpty } from "./identity.js";
-import type { Identity } from "./identity.js";
+import {
+  agentAttributes,
+  agentNameOf,
+  bindIdentity,
+  identityAttributes,
+  identityFromAttributes,
+  isIdentityEmpty,
+  withTaggedScope,
+} from "./identity.js";
+import type { Identity, Scope } from "./identity.js";
 
 export interface StartTraceOptions extends Identity {
   attributes?: Record<string, string>;
+  /** The agent this trace belongs to; every span inside it inherits the name. */
+  agentName?: string;
 }
 
-const START_TRACE_OPTION_KEYS = ["userId", "sessionId", "deviceId", "attributes"] as const;
+const START_TRACE_OPTION_KEYS = ["userId", "sessionId", "deviceId", "agentName", "attributes"] as const;
 
 function toStartTraceOptions(
   value?: Record<string, string> | StartTraceOptions
@@ -27,11 +37,20 @@ function toStartTraceOptions(
     userId: options.userId,
     sessionId: options.sessionId,
     deviceId: options.deviceId,
+    agentName: options.agentName,
     attributes: options.attributes,
   };
 }
 
-const SDK_VERSION = "0.2.17";
+function definedIdentity(options: Identity): Identity {
+  const out: Identity = {};
+  if (options.userId) out.userId = options.userId;
+  if (options.sessionId) out.sessionId = options.sessionId;
+  if (options.deviceId) out.deviceId = options.deviceId;
+  return out;
+}
+
+const SDK_VERSION = "0.3.0";
 
 const IO_MAX = 4096;
 
@@ -134,9 +153,10 @@ export class EvalKitClient {
     ctx: OtelContext;
   } {
     const options = toStartTraceOptions(attributesOrOptions);
-    const identity: Identity = isIdentityEmpty(options)
-      ? identityFromAttributes(options.attributes)
-      : options;
+    // Explicit option > attribute (any spelling), field by field; the result is bound to the
+    // trace so every child span, including auto-instrumented ones, carries it.
+    const identity: Identity = { ...identityFromAttributes(options.attributes), ...definedIdentity(options) };
+    const agentName = options.agentName || agentNameOf(options.attributes);
     const span = this.tracer.startSpan(
       name,
       {
@@ -144,8 +164,9 @@ export class EvalKitClient {
         attributes: {
           "evalkit.span_type": "log",
           ...this.metaAttributes(),
-          ...identityAttributes(identity),
           ...options.attributes,
+          ...identityAttributes(identity),
+          ...agentAttributes(agentName),
         },
       },
       context.active()
@@ -153,7 +174,8 @@ export class EvalKitClient {
 
     const ctx = trace.setSpan(context.active(), span);
     const traceId = span.spanContext().traceId;
-    if (!isIdentityEmpty(identity)) bindIdentity(traceId, identity);
+    const bound: Scope = agentName ? { ...identity, agentName } : identity;
+    if (!isIdentityEmpty(identity) || agentName) bindIdentity(traceId, bound);
 
     return {
       traceId,
@@ -229,7 +251,7 @@ export class EvalKitClient {
       },
       parentCtx ?? context.active()
     );
-    const ctx = trace.setSpan(context.active(), span);
+    const ctx = trace.setSpan(withTaggedScope(context.active(), attributes), span);
     return {
       ctx,
       end: (status: "OK" | "ERROR" = "OK", extraAttributes?: Record<string, string | number | boolean>) => {
