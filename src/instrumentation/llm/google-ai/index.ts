@@ -2,6 +2,7 @@ import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opente
 import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
 import { safeBody } from "../_body.js";
+import { generativeModelRequestAttrs } from "../_request.js";
 import type { GoogleUsage, GoogleUsageMetadata } from "../_google-usage.js";
 import { EMPTY_GOOGLE_USAGE, extractGoogleUsage, googleUsageAttributes, mergeGoogleUsage } from "../_google-usage.js";
 
@@ -63,6 +64,7 @@ export function patchGoogleAI(
           'evalkit.span_type': 'llm_call',
           'gen_ai.system': 'google-ai',
           'gen_ai.request.model': modelName,
+          ...generativeModelRequestAttrs(model, req),
           'evalkit.prompt': promptText,
         },
       },

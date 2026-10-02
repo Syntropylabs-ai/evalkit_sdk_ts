@@ -3,6 +3,7 @@ import type { Span, Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
 import { emitToolCalls, fromGoogleParts } from "../_toolcalls.js";
 import { safeBody } from "../_body.js";
+import { samplingAttrs, toolAttrs } from "../_request.js";
 import type { GoogleUsage, GoogleUsageMetadata } from "../_google-usage.js";
 import { EMPTY_GOOGLE_USAGE, extractGoogleUsage, googleUsageAttributes, mergeGoogleUsage } from "../_google-usage.js";
 
@@ -11,7 +12,13 @@ type Content = { role?: string; parts?: Part[] };
 type GenAIRequest = {
   model?: string;
   contents?: unknown;
-  config?: { systemInstruction?: unknown };
+  config?: {
+    systemInstruction?: unknown;
+    tools?: unknown[];
+    temperature?: number;
+    topP?: number;
+    maxOutputTokens?: number;
+  };
 };
 type Candidate = { content?: { parts?: Part[] }; finishReason?: string };
 type GenAIResponse = {
@@ -24,6 +31,14 @@ type ModelsProto = {
   generateContent?: (...args: unknown[]) => Promise<unknown>;
   generateContentStream?: (...args: unknown[]) => Promise<unknown>;
 };
+
+function requestAttrs(req: GenAIRequest): Record<string, number | string[]> {
+  const config = req.config;
+  return {
+    ...samplingAttrs({ temperature: config?.temperature, topP: config?.topP, maxTokens: config?.maxOutputTokens }),
+    ...toolAttrs(config?.tools),
+  };
+}
 
 function extractText(part?: { text?: string }): string {
   return part?.text ?? "";
@@ -109,6 +124,7 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
             "evalkit.span_type": "llm_call",
             "gen_ai.system": "google-genai",
             "gen_ai.request.model": modelName,
+            ...requestAttrs(req),
             "evalkit.prompt": buildPrompt(req),
           },
         },
@@ -160,6 +176,7 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
             "evalkit.span_type": "llm_call",
             "gen_ai.system": "google-genai",
             "gen_ai.request.model": modelName,
+            ...requestAttrs(req),
             "gen_ai.streaming": true,
             "evalkit.prompt": buildPrompt(req),
           },

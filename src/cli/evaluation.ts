@@ -15,6 +15,7 @@ const SPEC_KEYS = new Set([
   "data",
   "task",
   "evaluators",
+  "collections",
   "judgeModel",
   "judgeModelConfigId",
   "baselineJobId",

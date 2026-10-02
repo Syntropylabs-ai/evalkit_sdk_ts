@@ -268,7 +268,7 @@ try {
   }
   assert.strictEqual(quietPrinted, '');
 
-  await assert.rejects(() => Eval({ name: 'x', data: [{ input: 'a', output: 'b' }], evaluators: [lengthScorer] }), /at least one server rule id/);
+  await assert.rejects(() => Eval({ name: 'x', data: [{ input: 'a', output: 'b' }], evaluators: [lengthScorer] }), /at least one server evaluator/);
   await assert.rejects(() => Eval({ name: 'x', data: [{ input: 'a', output: 'b' }], evaluators: ['not-a-rule-id'] }), /neither a server rule id/);
   await assert.rejects(() => Eval({ name: 'x', data: [{ input: 'a' }], evaluators: [RULE] }), /no 'output' and no task/);
   await assert.rejects(() => Eval({ name: 'x', data: [], evaluators: [RULE] }), /data is empty/);

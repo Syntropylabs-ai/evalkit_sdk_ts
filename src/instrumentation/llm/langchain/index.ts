@@ -4,6 +4,7 @@ import type { EvalKitClient } from "../../../core/client.js";
 import { recordSimToolCall } from "../../../core/simulation.js";
 import { emitToolCalls, fromLangChainResult } from "../_toolcalls.js";
 import { safeBody } from "../_body.js";
+import { samplingAttrs, toolAttrs } from "../_request.js";
 import { dynImport, getRequire } from "../../../utils/dynimport.js";
 
 function loadLangChainModule(specifier: string): any {
@@ -44,6 +45,27 @@ function modelFrom(serialized: any, extraParams: any): string {
     if (kw[k]) return String(kw[k]);
   }
   return "unknown";
+}
+
+// invocation_params is the provider request each chat model builds, so it carries that
+// provider's own spelling of the sampling keys and its own tool shape.
+function invocationAttrs(extraParams: any): Record<string, number | string[]> {
+  try {
+    const inv = extraParams?.invocation_params ?? {};
+    const generation = inv.generationConfig ?? inv.inferenceConfig ?? {};
+    return {
+      ...samplingAttrs({
+        temperature: inv.temperature ?? generation.temperature,
+        topP: inv.top_p ?? inv.topP ?? generation.topP,
+        maxTokens:
+          inv.max_tokens ?? inv.maxTokens ?? inv.max_completion_tokens ?? inv.max_output_tokens ??
+          inv.maxOutputTokens ?? generation.maxOutputTokens ?? generation.maxTokens,
+      }),
+      ...toolAttrs(inv.tools, inv.toolConfig?.tools),
+    };
+  } catch {
+    return {};
+  }
 }
 
 function messagesToPrompt(messages: any): string {
@@ -102,7 +124,7 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
     parentRunId: string | undefined,
     spanType: string,
     name: string,
-    attributes: Record<string, string | number | boolean>,
+    attributes: Record<string, string | number | boolean | string[]>,
   ): void {
     try {
       const parent = parentRunId ? runs.get(parentRunId) : undefined;
@@ -141,6 +163,7 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
       startRun(runId, parentRunId, "llm_call", "llm.generate", {
         "gen_ai.request.model": model,
         "gen_ai.system": providerFrom(llm) ?? "",
+        ...invocationAttrs(extraParams),
         "evalkit.prompt": truncate((prompts ?? []).join("\n")),
         ...(reqBody ? { "gen_ai.request.body": reqBody } : {}),
       });
@@ -151,6 +174,7 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
       startRun(runId, parentRunId, "llm_call", "chat.generate", {
         "gen_ai.request.model": model,
         "gen_ai.system": providerFrom(llm) ?? "",
+        ...invocationAttrs(extraParams),
         "evalkit.prompt": messagesToPrompt(messages),
         ...(reqBody ? { "gen_ai.request.body": reqBody } : {}),
       });

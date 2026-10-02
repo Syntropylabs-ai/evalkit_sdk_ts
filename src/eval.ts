@@ -32,7 +32,8 @@ export interface EvalRow {
   output?: string;
   target?: unknown;
   expected?: unknown;
-  context?: unknown[];
+  /** The row's retrieved documents: one string or a list of them. */
+  context?: string | unknown[];
   metadata?: Record<string, unknown>;
   [key: string]: unknown;
 }
@@ -48,7 +49,15 @@ export interface EvalOptions {
   name: string;
   data: Iterable<EvalRow>;
   task?: (row: EvalRow) => string;
-  evaluators: Array<string | LocalEvaluator>;
+  /** Server rule ids (24 hex chars) and local scorer functions, in any mix. */
+  evaluators?: Array<string | LocalEvaluator>;
+  /**
+   * Evaluator collection ids, expanded into their rules by the server. One collection
+   * is scored with its own weights, thresholds, aggregation and hard gates; two or
+   * more run every rule once at weight 1. At least one rule id or collection id is
+   * required between `evaluators` and `collections`.
+   */
+  collections?: string[];
   judgeModel?: string;
   judgeModelConfigId?: string;
   baselineJobId?: string;
@@ -214,8 +223,16 @@ function splitEvaluators(evaluators: Array<string | LocalEvaluator>): { ruleIds:
     }
     throw new Error(`evaluators[${index}] is neither a server rule id (24 hex chars) nor a function`);
   });
-  if (!ruleIds.length) throw new Error("evaluators must include at least one server rule id");
   return { ruleIds, local };
+}
+
+function collectionIdsOf(collections: readonly string[]): string[] {
+  // A lone id would otherwise be read one character at a time.
+  if (typeof collections === "string") throw new Error("collections must be an array of collection ids, not a single string");
+  return Array.from(collections, (entry, index) => {
+    if (typeof entry === "string" && RULE_ID.test(entry)) return entry;
+    throw new Error(`collections[${index}] is not a collection id (24 hex chars)`);
+  });
 }
 
 function buildRows(data: Iterable<EvalRow>, task?: (row: EvalRow) => string): { source: EvalRow[]; outputs: string[] } {
@@ -277,15 +294,24 @@ function runLocal(
   return { localScores, localEntries };
 }
 
+// One retrieved document is a string; spreading it would send one character per entry.
+function contextList(context: string | unknown[]): unknown[] {
+  return typeof context === "string" ? [context] : [...context];
+}
+
 function rowMetadata(row: EvalRow): Record<string, unknown> {
   const metadata: Record<string, unknown> =
     row.metadata && typeof row.metadata === "object" ? { ...row.metadata } : {};
-  if (row.context !== undefined && row.context !== null) metadata.context = [...row.context];
+  if (row.context !== undefined && row.context !== null) metadata.context = contextList(row.context);
   return metadata;
 }
 
 class RunSpec {
-  constructor(private readonly opts: EvalOptions, readonly ruleIds: string[]) {}
+  constructor(
+    private readonly opts: EvalOptions,
+    readonly ruleIds: string[],
+    readonly collectionIds: string[],
+  ) {}
 
   get name(): string {
     return this.opts.name;
@@ -305,6 +331,7 @@ class RunSpec {
 
   createBody(): Record<string, unknown> {
     const body: Record<string, unknown> = { name: this.opts.name, ruleIds: [...this.ruleIds] };
+    if (this.collectionIds.length) body.collectionIds = [...this.collectionIds];
     Object.assign(body, this.judgeAndHyperparameters());
     if (this.opts.baselineJobId !== undefined) body.baselineJobId = this.opts.baselineJobId;
     if (this.opts.autoBaseline !== undefined) body.autoBaseline = this.opts.autoBaseline;
@@ -368,7 +395,7 @@ class RunRows {
       const item: Record<string, unknown> = { input: row.input, output: this.outputs[index] };
       const target = row.target ?? row.expected;
       if (target !== undefined && target !== null) item.target = target;
-      if (row.context !== undefined && row.context !== null) item.context = [...row.context];
+      if (row.context !== undefined && row.context !== null) item.context = contextList(row.context);
       payload.push(item);
     }
     return payload;
@@ -419,8 +446,20 @@ class RunApi {
   }
 }
 
+// The server's reason ("Evaluation rule(s) not found: ...") is what says what to fix;
+// the raw body is the fallback when there is none.
 function failure(result: PostResult): Error {
-  return new Error(`Eval failed ${result.status}: ${result.text}`);
+  return new Error(`Eval failed ${result.status}: ${serverMessage(result.text) ?? result.text}`);
+}
+
+function serverMessage(text: string): string | null {
+  try {
+    const message = (JSON.parse(text) as { message?: unknown } | null)?.message;
+    const joined = Array.isArray(message) ? message.map(String).join("; ") : message;
+    return typeof joined === "string" && joined ? joined : null;
+  } catch {
+    return null;
+  }
 }
 
 function isQuiet(): boolean {
@@ -475,13 +514,23 @@ async function runAppended(
   if (!created.ok) throw failure(created);
   const runId = created.body.runId as string | undefined;
   if (!runId) throw new Error("[evalkit] POST /evaluation-runs answered without a runId");
+  // A server that predates collections drops the field without an error and would
+  // score only the rule ids; the rule list it echoes is how a newer one answers.
+  if (spec.collectionIds.length && !Array.isArray(created.body.ruleIds)) {
+    throw new Error(
+      `[evalkit] this EvalKit server does not support collections, so run ${runId} would score none of their rules; ` +
+        "upgrade the server, or pass the collection's rule ids in evaluators",
+    );
+  }
   const url = (created.body.url as string | undefined) ?? null;
   if (url) announce(url);
 
   for (const [start, stop] of rows.batches()) {
     const appended = await api.postWithRetry(`/evaluation-runs/${runId}/rows`, { rows: rows.appendPayload(start, stop) });
     if (appended.ok) continue;
-    if (appended.status === 404) {
+    // The single-call fallback cannot carry collections: fail rather than score a
+    // different set of evaluators.
+    if (appended.status === 404 && !spec.collectionIds.length) {
       rowsEndpointSupport.set(client, false);
       return null;
     }
@@ -573,17 +622,23 @@ export async function Eval(client: EvalKitClient, opts: EvalOptions): Promise<Ev
   const batchSize = opts.batchSize ?? MAX_ROWS_PER_BATCH;
   if (batchSize < 1) throw new Error("batchSize must be at least 1");
 
-  const { ruleIds, local } = splitEvaluators(opts.evaluators);
+  const { ruleIds, local } = splitEvaluators(opts.evaluators ?? []);
+  const collectionIds = collectionIdsOf(opts.collections ?? []);
+  if (!ruleIds.length && !collectionIds.length) {
+    throw new Error("name at least one server evaluator: a rule id in evaluators or a collection id in collections");
+  }
   const { source, outputs } = buildRows(opts.data, opts.task);
   const { localScores, localEntries } = runLocal(local, source, outputs);
 
-  const spec = new RunSpec(opts, ruleIds);
+  const spec = new RunSpec(opts, ruleIds, collectionIds);
   const rows = new RunRows(source, outputs, localScores, localEntries, Math.min(batchSize, MAX_ROWS_PER_BATCH));
 
   const base = (opts.apiUrl ?? process.env.EVALKIT_API_URL ?? client.options.apiUrl).replace(/\/$/, "");
   const api = new RunApi(client, base, opts.timeoutMs ?? 600_000);
 
-  if (rowsEndpointSupport.get(client) !== false) {
+  // Collections exist only on the appended path, so a client once served by an older
+  // deployment still tries it for them; that server then refuses with a clear error.
+  if (collectionIds.length || rowsEndpointSupport.get(client) !== false) {
     const appended = await runAppended(api, client, spec, rows);
     if (appended) return appended;
   }

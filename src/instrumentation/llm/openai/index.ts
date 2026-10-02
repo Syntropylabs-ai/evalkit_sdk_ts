@@ -3,6 +3,7 @@ import type { Span, Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
 import { emitToolCalls, fromOpenAIChat } from "../_toolcalls.js";
 import { safeBody } from "../_body.js";
+import { toolAttrs } from "../_request.js";
 
 type Messages = Array<{ role: string; content: string | null }>;
 type ToolCall = {
@@ -159,6 +160,7 @@ export function patchOpenAI(
           ...(params.temperature != null && { "gen_ai.request.temperature": params.temperature }),
           ...(params.max_tokens != null && { "gen_ai.request.max_tokens": params.max_tokens }),
           ...(params.top_p != null && { "gen_ai.request.top_p": params.top_p }),
+          ...toolAttrs(params.tools),
           "evalkit.prompt": messagesToText(params.messages ?? []),
         },
       },

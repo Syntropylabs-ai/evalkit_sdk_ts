@@ -2,6 +2,7 @@ import { SpanKind, context as otelContext, trace } from "@opentelemetry/api";
 import type { Span, Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
 import { safeBody } from "../_body.js";
+import { toolAttrs } from "../_request.js";
 import { fromConverseBlocks } from "../_toolcalls.js";
 import { BEDROCK_PROVIDER, applyResponse, endSpan, failSpan, toError } from "./_attrs.js";
 import {
@@ -28,6 +29,7 @@ type ConverseInput = {
   messages?: Array<{ role?: string; content?: Array<{ text?: string }> }>;
   system?: Array<{ text?: string }>;
   inferenceConfig?: { maxTokens?: number; temperature?: number; topP?: number };
+  toolConfig?: { tools?: unknown[] };
 };
 type ConverseContentBlock = {
   text?: string;
@@ -277,6 +279,7 @@ function startConverseSpan(
         ...(inferCfg.temperature != null && { 'gen_ai.request.temperature': inferCfg.temperature }),
         ...(inferCfg.maxTokens != null && { 'gen_ai.request.max_tokens': inferCfg.maxTokens }),
         ...(inferCfg.topP != null && { 'gen_ai.request.top_p': inferCfg.topP }),
+        ...toolAttrs(input?.toolConfig?.tools),
         'evalkit.prompt': conversePrompt(input),
       },
     },
@@ -308,6 +311,8 @@ function startInvokeModelSpan(
         ...(info.temperature != null && { 'gen_ai.request.temperature': info.temperature }),
         ...(info.maxTokens != null && { 'gen_ai.request.max_tokens': info.maxTokens }),
         ...(info.topP != null && { 'gen_ai.request.top_p': info.topP }),
+        // Anthropic, Mistral and Cohere bodies list tools at the top, Nova under toolConfig like Converse.
+        ...toolAttrs(requestBody?.tools, requestBody?.toolConfig?.tools),
         'evalkit.prompt': info.prompt,
       },
     },

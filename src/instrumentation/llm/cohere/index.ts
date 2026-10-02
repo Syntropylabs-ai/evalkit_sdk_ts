@@ -2,6 +2,7 @@ import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opente
 import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
 import { safeBody } from "../_body.js";
+import { toolAttrs } from "../_request.js";
 
 type ChatParams = {
   model?: string;
@@ -9,7 +10,9 @@ type ChatParams = {
   chatHistory?: Array<{ role: string; message?: string }>;
   temperature?: number;
   maxTokens?: number;
+  p?: number;
   preamble?: string;
+  tools?: unknown[];
   stream?: boolean;
 };
 type ChatResponse = {
@@ -54,6 +57,8 @@ export function patchCohere(
           'gen_ai.request.model': params?.model ?? 'unknown',
           ...(params?.temperature != null && { 'gen_ai.request.temperature': params.temperature }),
           ...(params?.maxTokens != null && { 'gen_ai.request.max_tokens': params.maxTokens }),
+          ...(params?.p != null && { 'gen_ai.request.top_p': params.p }),
+          ...toolAttrs(params?.tools),
           'evalkit.prompt': promptText,
         },
       },

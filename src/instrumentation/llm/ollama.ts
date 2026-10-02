@@ -2,9 +2,16 @@ import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opente
 import type { Span } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody } from "./_body.js";
+import { samplingAttrs, toolAttrs } from "./_request.js";
 
 type OllamaMessage = { role: string; content: string; thinking?: string; tool_calls?: unknown[] };
-type ChatParams = { model?: string; messages?: OllamaMessage[]; stream?: boolean };
+type ChatParams = {
+  model?: string;
+  messages?: OllamaMessage[];
+  stream?: boolean;
+  tools?: unknown[];
+  options?: { temperature?: number; top_p?: number; num_predict?: number };
+};
 type ChatResponse = {
   model: string;
   message: OllamaMessage;
@@ -96,6 +103,12 @@ function patchChatMethod(client: EvalKitClient, proto: any): void {
           "evalkit.span_type": "llm_call",
           "gen_ai.system": "ollama",
           "gen_ai.request.model": params?.model ?? "unknown",
+          ...samplingAttrs({
+            temperature: params?.options?.temperature,
+            topP: params?.options?.top_p,
+            maxTokens: params?.options?.num_predict,
+          }),
+          ...toolAttrs(params?.tools),
           "evalkit.prompt": messagesToText(params?.messages),
         },
       },

@@ -1,12 +1,6 @@
-# EvalKit TypeScript SDK — Integration Guide
+# EvalKit TypeScript SDK integration guide
 
-`syntropylabs-evalkit` 
-
-- **Package:** `syntropylabs-evalkit`
-- **Requires:** Node.js ≥ 18
-- **ESM + CommonJS**, types bundled.
-
----
+The package is `syntropylabs-evalkit`. It needs Node.js 18 or later, works from ESM and CommonJS, and ships its own types.
 
 ## 1. Install
 
@@ -15,19 +9,15 @@ npm install syntropylabs-evalkit
 # or: pnpm add syntropylabs-evalkit / yarn add syntropylabs-evalkit
 ```
 
----
-
 ## 2. Quick start
 
-Call `init()` **once, as early as possible** — before you import/create your LLM
-clients and web app. After that, use your code normally; LLM calls, outbound HTTP,
-DB queries, and tool calls are traced automatically.
+Call `init()` once, as early as you can, before you import or create your LLM clients and your web app. After that, write your code as usual. LLM calls, outbound HTTP, database queries and tool calls are traced for you.
 
 ```ts
 import { init } from "syntropylabs-evalkit";
 
 init({
-  subscriptionKey: "sk_live_...",   // required — get it from your dashboard
+  subscriptionKey: "sk_live_...",   // required. Settings → This project → Environments
   serviceName: "my-agent",
   environment: "production",
 });
@@ -36,10 +26,7 @@ init({
 // are auto-traced and shipped to EvalKit.
 ```
 
-For ESM, import the SDK before the libraries you want traced. In CommonJS the same
-ordering applies — `require("syntropylabs-evalkit")` and `init()` first.
-
----
+With ESM, import the SDK before the libraries you want traced. With CommonJS the order is the same: `require("syntropylabs-evalkit")` and call `init()` first.
 
 ## 3. Configuration
 
@@ -57,27 +44,26 @@ init({
 });
 ```
 
-Only `subscriptionKey` is required; everything else has sensible defaults.
-
----
+Only `subscriptionKey` is required. Every other option has a default.
 
 ## 4. What gets traced automatically
 
-After `init()`, the SDK auto-instruments libraries present in your app:
+After `init()`, the SDK instruments these libraries when your app uses them:
 
-- **LLM providers:** OpenAI (Chat Completions + Responses), Anthropic (Messages + streaming), Google (`@google/genai` + Vertex), Cohere, AWS Bedrock, LangChain / LangGraph. Each emits an `llm_call` span with `model`, `provider`, prompt, completion, token usage, latency, tool calls, and streaming accumulation.
-- **HTTP clients:** `axios` and Node's `http`/`fetch` → `http_call` spans, with W3C `traceparent` propagation injected outbound.
-- **Databases:** Mongoose, Redis (`ioredis`/`redis`), `pg`, `mysql2`, Prisma → `db_query` spans.
-- **MCP** tool calls → `tool_call` spans.
+| Library | Span |
+|---|---|
+| OpenAI (Chat Completions and Responses), Anthropic (Messages, including streaming), Google (`@google/genai` and Vertex), Cohere, AWS Bedrock, LangChain and LangGraph | `llm_call`, with the model, provider, prompt, completion, token usage, latency and tool calls. Streams are accumulated |
+| `axios`, and Node's `http` and `fetch` | `http_call`. A W3C `traceparent` header is added to outbound requests |
+| Mongoose, Redis (`ioredis` and `redis`), `pg` and `mysql2`, and Prisma when `@prisma/instrumentation` is installed | `db_query` |
+| MCP tool calls | `tool_call` |
 
-> Dedup: if a library is already covered by community OpenTelemetry instrumentation, the SDK steps aside so you don't get double spans.
+When `@opentelemetry/instrumentation` is installed, the SDK also registers the OpenTelemetry instrumentations it finds. That is everything in `@opentelemetry/auto-instrumentations-node` except `fs`, `undici` and `http`, or, without that package, the Prisma, MongoDB, Mongoose, ioredis, Redis, pg, mysql2, GraphQL and NestJS instrumentations that are installed.
 
----
+Another OpenTelemetry instrumentation can report the same LLM call as EvalKit. Its span is still exported, but as a `function_call` with no token counts, so tokens and cost are counted once, from EvalKit's own `llm_call` span. Set `EVALKIT_COUNT_FOREIGN_LLM=1` to count those spans too.
 
-## 5. Manual LLM client patching (optional)
+## 5. Patching an LLM client by hand (optional)
 
-Auto-patching covers most setups. For a client the auto-patch can't reach, patch the
-instance directly:
+Automatic patching covers most setups. When it cannot reach a client, patch the instance yourself:
 
 ```ts
 import OpenAI from "openai";
@@ -87,7 +73,7 @@ const openai = new OpenAI();
 patchOpenAIClient(openai);
 ```
 
-Available helpers:
+The helpers:
 
 ```
 patchOpenAIClient(client)
@@ -104,14 +90,12 @@ patchAxiosClient(axios)          instrumentPrisma(prisma)
 patchMCPClient(clientOrClass)
 ```
 
----
+## 6. Web frameworks
 
-## 6. Web framework integration
+The middleware turns each inbound request into a server span, continues an upstream `traceparent`, and puts the trace id on the response.
 
-Add the middleware so inbound requests become server spans, continue an upstream
-`traceparent`, and expose the trace id on the response.
+Express:
 
-**Express**
 ```ts
 import express from "express";
 import { expressMiddleware } from "syntropylabs-evalkit";
@@ -120,13 +104,15 @@ const app = express();
 app.use(expressMiddleware());
 ```
 
-**Fastify**
+Fastify:
+
 ```ts
 import { fastifyPlugin } from "syntropylabs-evalkit";
 await app.register(fastifyPlugin());
 ```
 
-**Koa / Hono / Hapi**
+Koa, Hono and Hapi:
+
 ```ts
 import { koaMiddleware, honoMiddleware, hapiPlugin } from "syntropylabs-evalkit";
 koaApp.use(koaMiddleware());
@@ -134,29 +120,30 @@ honoApp.use(honoMiddleware());
 await hapiServer.register(hapiPlugin());
 ```
 
-**NestJS**
+NestJS:
+
 ```ts
 import { createNestjsInterceptor } from "syntropylabs-evalkit";
 app.useGlobalInterceptors(createNestjsInterceptor());
 ```
 
----
-
 ## 7. Manual tracing
 
-Use these for explicit spans around code the auto-tracer doesn't cover.
+Use these for explicit spans around code that automatic tracing does not cover.
 
-**Wrap a function / tool** (sync or async):
+Wrap a function or a tool, sync or async:
+
 ```ts
 import { traceFunction, traceTool } from "syntropylabs-evalkit";
 
 const buildPrompt = traceFunction("build-prompt", (userId: string) => { /* ... */ });
 
-// First-class tool_call span (Input/Output panels + tool metrics):
+// A tool_call span, with Input and Output panels and tool metrics:
 const searchDocs = traceTool("search_docs", async (query: string) => { /* ... */ });
 ```
 
-**Decorators:**
+Decorators:
+
 ```ts
 import { TraceMethod, Traced } from "syntropylabs-evalkit";
 
@@ -167,7 +154,8 @@ class Agent {
 }
 ```
 
-**Imperative spans:**
+Spans you open and end yourself:
+
 ```ts
 import { startSpan, startTrace, startHttpTrace, withTrace, currentTraceId } from "syntropylabs-evalkit";
 
@@ -189,15 +177,11 @@ await withTrace(ctx, async () => { /* ... */ });
 currentTraceId();               // active trace id, for log correlation
 ```
 
-`captureIO` (last arg of `traceFunction`/`traceTool`, default `true`) records
-args/results as span attributes (truncated). Pass `false` for sensitive payloads.
+`captureIO`, the last argument of `traceFunction` and `traceTool`, records the arguments and the result as span attributes, truncated. It is `true` by default. Pass `false` for sensitive payloads.
 
----
+## 8. Realtime and voice (WebSocket)
 
-## 8. Realtime / voice (WebSocket)
-
-Wrap a streaming voice session to get `voice.session` / `voice.turn` / `tool_call`
-spans:
+Wrap a streaming voice session to get `voice.session`, `voice.turn` and `tool_call` spans:
 
 ```ts
 import { traceLive, traceOpenAIRealtime } from "syntropylabs-evalkit";
@@ -205,18 +189,14 @@ import { traceLive, traceOpenAIRealtime } from "syntropylabs-evalkit";
 // Google Gemini Live
 const session = await traceLive(ai, { model: "gemini-2.0-flash-live" });
 
-// OpenAI Realtime — attach to an already-created connection
+// OpenAI Realtime: attach to an already-created connection
 const rt = new OpenAIRealtimeWebSocket({ model: "gpt-realtime" });
 traceOpenAIRealtime(rt);
 ```
 
----
+## 9. Offline evaluation with `evaluate()`
 
-## 9. Offline evaluation — `evaluate()`
-
-Deterministic metrics computed **locally, with no LLM call**. Returns a
-`{ metricName: score }` map (0.0–1.0) and, when initialized, also records an
-`eval_result` span.
+`evaluate()` computes deterministic metrics locally, without calling an LLM. It returns a `{ metricName: score }` map with scores from 0 to 1. After `init()`, it also records an `eval_result` span.
 
 ```ts
 import { evaluate } from "syntropylabs-evalkit";
@@ -233,15 +213,11 @@ const scores = evaluate({
 // -> { tool_trajectory: 1, tool_f1: 1, response_match: 1, contextual_precision: 0.5, ... }
 ```
 
-Each metric is computed only when its inputs are present (tool metrics need
-`expectedTools`, RAG metrics need `retrievedContext` + `expectedContext`, etc.).
+A metric is computed only when its inputs are present. The tool metrics need `expectedTools`, and the RAG metrics need `retrievedContext` and `expectedContext`.
 
----
+## 10. Scenarios and simulation (optional)
 
-## 10. Scenarios & simulation (optional)
-
-Generate test scenarios and run a synthetic user against your agent. The judge/
-generator model is **bring-your-own-key** and never stored.
+Generate test scenarios and run a synthetic user against your agent. You bring the key for the judge and generator model, and it is never stored.
 
 ```ts
 import { generateScenarios, simulateUser, evaluateSimulation } from "syntropylabs-evalkit";
@@ -272,26 +248,23 @@ const report = await evaluateSimulation({
 });
 ```
 
-All spans produced during a scenario are tagged so they're filterable in the
-dashboard.
+Each scenario runs as one trace, `scenario:<name>`, in a session of its own. Every span in that trace carries the simulation, run and scenario ids, so the dashboard can filter by them. A scenario that throws is recorded with status `ERROR` and its message, and the other scenarios keep running.
 
----
+## 11. Flushing and shutdown
 
-## 11. Flushing & shutdown
-
-Spans are batched and exported in the background. To force a synchronous flush
-(short-lived scripts, serverless, before exit):
+Spans are batched and exported in the background. Flush them yourself in short-lived scripts, in serverless functions and before the process exits:
 
 ```ts
 import { flush } from "syntropylabs-evalkit";
 await flush();
 ```
 
----
+## 12. Troubleshooting
 
-## 12. Notes & troubleshooting
+Nothing shows up: check that `init()` runs before your clients and your app are created, and that the `subscriptionKey` is valid. After 3 consecutive `401` or `403` responses the exporter turns itself off for the life of the process, so fix the key and restart.
 
-- **Nothing showing up?** Make sure `init()` runs before your clients/app are created and the `subscriptionKey` is valid. A repeatedly-rejected key disables the exporter for the process — fix the key and restart.
-- **Duplicate spans?** You probably manually patched a client that's also auto-instrumented; drop the manual `patch*` call.
-- **Sensitive payloads:** pass `captureIO: false` to `traceFunction`/`traceTool` and lower `maxBodyBytes`. Captured HTTP bodies are size-capped.
-- **Span types you'll see:** `llm_call`, `tool_call`, `http_call`, `db_query`, `function_call`, `log`, `eval_result`.
+Duplicate spans: a `patch*` helper on a client that is already instrumented does nothing, because a patched method is marked and never wrapped twice. `instrumentPrisma` works differently. It returns an extended copy of the Prisma client and leaves the one you pass unchanged, so use the copy and call it once. Skip it when `@prisma/instrumentation` is installed, because the SDK already traces Prisma through it. If token and cost totals double, look for a second EvalKit exporter on the same provider (see the README section [Coexisting with an OpenTelemetry setup you already have](./README.md#coexisting-with-an-opentelemetry-setup-you-already-have)).
+
+Sensitive payloads: pass `captureIO: false` to `traceFunction` and `traceTool`, and lower `maxBodyBytes`. Captured HTTP bodies are always capped at `maxBodyBytes`.
+
+The span types you will see are `llm_call`, `tool_call`, `http_call`, `db_query`, `function_call`, `log` and `eval_result`.
