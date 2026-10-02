@@ -13,7 +13,8 @@ name: Publish TypeScript SDK
 #   3. Add the token as an environment secret named `NPM_TOKEN` under `prod`.
 #
 # Release flow:
-#   - Bump "version" in package.json, commit, then:
+#   - Bump "version" in package.json and SDK_VERSION in src/core/client.ts, add a
+#     CHANGELOG entry, commit, then:
 #       git tag v0.1.18 && git push origin v0.1.18
 
 on:
@@ -41,6 +42,20 @@ jobs:
         with:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
+
+      # npm never accepts the same version twice, so a run without a version bump would
+      # fail only at the upload, after the whole build. This fails first and says what to change.
+      - name: Check the version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if ! grep -q "const SDK_VERSION = \"$version\";" src/core/client.ts; then
+            echo "::error file=src/core/client.ts::SDK_VERSION in src/core/client.ts must match package.json ($version). Spans report it as the SDK version."
+            exit 1
+          fi
+          if [ "$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/syntropylabs-evalkit/$version")" = 200 ]; then
+            echo "::error file=package.json::syntropylabs-evalkit@$version is already on npm, and npm never accepts a version twice. Bump \"version\" in package.json and SDK_VERSION in src/core/client.ts, add a CHANGELOG entry, commit and run this again."
+            exit 1
+          fi
 
       - name: Install dependencies
         run: npm ci

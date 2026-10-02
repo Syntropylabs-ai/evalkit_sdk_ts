@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.1 — 2026-09-26
+## 0.3.2 — 2026-10-02
 
 ### Added
 - `Eval({ ..., collections: [...] })` runs evaluator collections from the dashboard by id,
@@ -16,12 +16,6 @@
   per character, so a grounding evaluator judged the answer against single letters.
 - An HTTP error from an evaluation run reads as the server's reason
   (`Eval failed 404: Evaluation rule(s) not found: ...`). It used to be the raw response body.
-- A tool call the model only requested is recorded as a `gen_ai.tool.call` event on its model-call
-  span, as the Python SDK does, and no longer also as a `tool_call` span. The tool your code runs
-  (through `traceTool`) was counted twice: once for the request and once for the run. A
-  `tool_call` span is still recorded when the provider ran the tool itself and returned its result.
-- Model-call spans and the other spans the SDK's instrumentation starts report the SDK version
-  (`sdkVersion`). Before, only the spans an app opened with `startTrace` or `startSpan` did.
 - Model-call spans list the tools the request offered as `gen_ai.request.tools` (an array of tool
   names, deduplicated in request order), as the Python SDK does, so TS agent versions on the
   dashboard show their tools even when the request body is not captured or was dropped from an
@@ -33,6 +27,16 @@
 - Sampling parameters are recorded where they were missing: Google GenAI, Google AI and Vertex AI
   (`temperature`, `topP`, `maxOutputTokens`), Ollama (`options.temperature`, `top_p`,
   `num_predict`), Cohere (`p`), and LangChain (from `invocation_params`).
+
+## 0.3.1 — 2026-09-26
+
+### Fixed
+- A tool call the model only requested is recorded as a `gen_ai.tool.call` event on its model-call
+  span, as the Python SDK does, and no longer also as a `tool_call` span. The tool your code runs
+  (through `traceTool`) was counted twice: once for the request and once for the run. A
+  `tool_call` span is still recorded when the provider ran the tool itself and returned its result.
+- Model-call spans and the other spans the SDK's instrumentation starts report the SDK version
+  (`sdkVersion`). Before, only the spans an app opened with `startTrace` or `startSpan` did.
 
 ## 0.3.0 — 2026-09-26
 
