@@ -5,6 +5,7 @@ import type { EvalKitClient } from '../../core/client.js';
 import { requireBuiltin } from '../../utils/dynimport.js';
 import { sanitizeHeaders } from '../../utils/headers.js';
 import { _evalkitAxiosSpanMap } from '../../utils/axios-span-map.js';
+import { clientSpanName, serverRoute } from '../../utils/http-route.js';
 
 const SKIP_PATTERNS = [
   /\/v1\/ingest/,
@@ -22,7 +23,7 @@ function extractUrlMethod(
   input: string | URL | http.RequestOptions,
   secondArg: http.RequestOptions | undefined,
   scheme: string,
-): { url: string; method: string; pathname: string } {
+): { url: string; method: string } {
   let url = '';
   let method = 'GET';
 
@@ -40,12 +41,7 @@ function extractUrlMethod(
     method = (input.method ?? secondArg?.method ?? 'GET').toUpperCase();
   }
 
-  let pathname = url;
-  try {
-    pathname = new URL(url.startsWith('http') ? url : `${scheme}://localhost${url}`).pathname;
-  } catch { }
-
-  return { url, method, pathname };
+  return { url, method };
 }
 
 export function patchHttp(client: EvalKitClient): void {
@@ -74,7 +70,7 @@ export function patchHttp(client: EvalKitClient): void {
       callback?: (res: http.IncomingMessage) => void,
     ): http.ClientRequest {
       const options = typeof optionsOrCallback === 'function' ? undefined : optionsOrCallback;
-      const { url, method, pathname } = extractUrlMethod(input, options, scheme);
+      const { url, method } = extractUrlMethod(input, options, scheme);
 
       if (shouldSkip(url)) {
         return orig.call(mod, input, optionsOrCallback, callback);
@@ -112,7 +108,7 @@ export function patchHttp(client: EvalKitClient): void {
 
       const sanitized = sanitizeHeaders(reqHeaders);
 
-      const span = client.tracer.startSpan(`${method} ${pathname}`, {
+      const span = client.tracer.startSpan(clientSpanName(method), {
         kind: SpanKind.CLIENT,
         attributes: {
           'evalkit.span_type': 'http_call',
@@ -254,7 +250,17 @@ export function patchIncomingHttp(client: EvalKitClient): void {
     (res as any).write = function (chunk: any, ...rest: any[]) { captureChunk(chunk); return (origWrite as any)(chunk, ...rest); };
     (res as any).end = function (chunk: any, ...rest: any[]) { captureChunk(chunk); return (origEnd as any)(chunk, ...rest); };
 
+    // The framework matches the route after this span opened, so the name is settled when the
+    // response is done: `GET /orders/:id`, or the raw path when no route matched.
+    const nameByRoute = () => {
+      const route = serverRoute(req);
+      if (!route) return;
+      span.updateName(`${method} ${route}`);
+      span.setAttribute('http.route', route);
+    };
+
     res.on('finish', () => {
+      nameByRoute();
       span.setAttribute('http.status_code', res.statusCode);
       try {
         const respHeaders = res.getHeaders();
@@ -272,6 +278,7 @@ export function patchIncomingHttp(client: EvalKitClient): void {
       span.end();
     });
     res.on('error', (err: Error) => {
+      nameByRoute();
       span.setAttribute('error.message', err.message);
       span.recordException(err instanceof Error ? err : new Error(String(err)));
       span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });

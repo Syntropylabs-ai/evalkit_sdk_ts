@@ -7,7 +7,11 @@ export interface TraceEnvelope {
   parentSpanId?: string;
 
   spanKind?: "CLIENT" | "SERVER" | "INTERNAL" | "PRODUCER" | "CONSUMER";
-  spanType: "llm_call" | "tool_call" | "log" | "http_call" | "function_call" | "db_query" | "eval_result";
+  /**
+   * `agent` is one agent's run (an agent framework's `invoke_agent` span); `internal` is a framework's own
+   * structure that is neither a model call nor a tool call (an event-loop cycle).
+   */
+  spanType: "llm_call" | "tool_call" | "log" | "http_call" | "function_call" | "db_query" | "eval_result" | "agent" | "internal";
   status?: "OK" | "ERROR" | "UNSET";
   statusMessage?: string;
   serviceName?: string;
@@ -89,6 +93,8 @@ export interface EvalKitOptions {
   captureContent?: boolean;
 
   captureSecrets?: boolean;
+
+  exportGzip?: boolean;
 
   mask?: MaskHook;
 

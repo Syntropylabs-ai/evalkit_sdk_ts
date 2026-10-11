@@ -1,16 +1,54 @@
+import { promisify } from "node:util";
+import { gzip } from "node:zlib";
 import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace-base";
 import { ExportResultCode } from "@opentelemetry/core";
 import type { ExportResult } from "@opentelemetry/core";
-import type { TraceEnvelope, SpanEvent, BatchIngestRequest } from "./types.js";
+import type { TraceEnvelope, SpanEvent } from "./types.js";
 import { simByTraceId } from "./simulation.js";
 import { agentAttributes, agentNameOf, scopeForSpan, sessionIdOf, userIdOf } from "./identity.js";
-import { applyMask, stripContent } from "./redact.js";
+import { frameworkSpanFields } from "./framework-spans.js";
+import { applyMask, envFlag, stripContent } from "./redact.js";
 import { scrubSecrets } from "./secrets.js";
 import type { MaskHook } from "./redact.js";
 
 const AUTH_FAIL_LIMIT = 3;
 
 const MAX_SPAN_BYTES = 8 * 1024 * 1024;
+
+// The most JSON one export request carries, measured before compression. A batch of large spans goes out
+// as several requests, so no request comes near the 10 MiB that the proxy in front of the receiver accepts,
+// and a refused request costs only its own spans, not the whole batch.
+const MAX_REQUEST_BYTES = 4 * 1024 * 1024;
+
+const DEFAULT_MAX_REQUEST_SPANS = 512;
+
+export const EXPORT_GZIP_ENV_VARS = ["EVALKIT_EXPORT_GZIP"] as const;
+
+// zlib's default: close to the ratio of level 9 for a fraction of the CPU time.
+const GZIP_LEVEL = 6;
+
+const gzipAsync = promisify(gzip);
+
+const BODY_OVERHEAD = '{"events":[]}'.length;
+
+export function resolveExportGzip(explicit?: boolean): boolean {
+  if (explicit !== undefined) return explicit;
+  for (const name of EXPORT_GZIP_ENV_VARS) {
+    const flag = envFlag(name);
+    if (flag !== undefined) return flag;
+  }
+  return true;
+}
+
+interface EncodedSpan {
+  json: string;
+  bytes: number;
+  operation: string;
+}
+
+// "refused": the receiver refused this request's spans, and the next request may still be accepted.
+// "halt": no answer, only 5xx ones, or a refused key, so every later request would meet the same failure.
+type Outcome = "sent" | "refused" | "halt";
 
 const CACHE_READ_KEYS = [
   "gen_ai.usage.cache_read_tokens",
@@ -79,6 +117,8 @@ export class EvalKitExporter implements SpanExporter {
   private readonly captureContent: boolean;
   private readonly captureSecrets: boolean;
   private readonly mask?: MaskHook;
+  private readonly maxRequestSpans: number;
+  private gzip: boolean;
   private authFailures = 0;
   private disabled = false;
 
@@ -89,6 +129,8 @@ export class EvalKitExporter implements SpanExporter {
     debug?: boolean;
     captureContent?: boolean;
     captureSecrets?: boolean;
+    exportGzip?: boolean;
+    maxExportBatchSize?: number;
     mask?: MaskHook;
   }) {
     this.url = `${opts.baseUrl.replace(/\/$/, "")}/v1/ingest`;
@@ -97,6 +139,9 @@ export class EvalKitExporter implements SpanExporter {
     this.debug = opts.debug ?? false;
     this.captureContent = opts.captureContent ?? true;
     this.captureSecrets = opts.captureSecrets ?? false;
+    this.gzip = opts.exportGzip ?? resolveExportGzip();
+    const maxSpans = Math.floor(Number(opts.maxExportBatchSize));
+    this.maxRequestSpans = maxSpans >= 1 ? maxSpans : DEFAULT_MAX_REQUEST_SPANS;
     this.mask = opts.mask;
   }
 
@@ -125,62 +170,133 @@ export class EvalKitExporter implements SpanExporter {
       return scope !== "gcp.vertex.agent";
     });
 
-    const events = nonAdkSpans
+    const encoded = nonAdkSpans
       .map((s) => this.redact(this.toEnvelope(s)))
       .filter((e): e is TraceEnvelope => e !== null)
-      .map((e) => fitEnvelope(e, this.debug))
-      .filter((e): e is TraceEnvelope => e !== null);
+      .map((e) => encodeEnvelope(e, this.debug))
+      .filter((e): e is EncodedSpan => e !== null);
 
-    if (events.length === 0) {
+    if (encoded.length === 0) {
       resultCallback({ code: ExportResultCode.SUCCESS });
       return;
     }
 
-    const body: BatchIngestRequest = { events };
-
     if (this.debug) {
-      console.log(`[evalkit] sending ${events.length} span(s) → ${this.url}`);
+      console.log(`[evalkit] sending ${encoded.length} span(s) → ${this.url}`);
     }
 
-    this.fetchWithRetry(this.url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Subscription-Key": this.subscriptionKey,
-      },
-      body: JSON.stringify(body),
-    })
-      .then(async (res) => {
-        if (!res.ok) {
-          const text = await res.text().catch(() => "(no body)");
-          if (res.status === 401 || res.status === 403) {
-            this.authFailures++;
-            if (this.authFailures >= AUTH_FAIL_LIMIT) {
-              this.disabled = true;
-              console.error(
-                `[evalkit] export rejected ${res.status}: ${text} — disabling tracing after ` +
-                `${this.authFailures} consecutive auth failures; check your EvalKit subscription key.`,
-              );
-            } else if (this.debug) {
-              console.warn(`[evalkit] export rejected ${res.status} (auth failure ${this.authFailures}/${AUTH_FAIL_LIMIT})`);
-            }
-          } else {
-            console.error(`[evalkit] export failed ${res.status}: ${text}`);
-          }
-          resultCallback({ code: ExportResultCode.FAILED });
-          return;
-        }
-        this.authFailures = 0;
-        if (this.debug) {
-          const data = await res.json().catch(() => ({}));
-          console.log(`[evalkit] exported ${events.length} span(s) — status: ${(data as { status?: string }).status}`);
-        }
-        resultCallback({ code: ExportResultCode.SUCCESS });
-      })
-      .catch((err) => {
-        console.error("[evalkit] export network error:", err);
+    this.sendAll(encoded).then(
+      (ok) => resultCallback({ code: ok ? ExportResultCode.SUCCESS : ExportResultCode.FAILED }),
+      (err) => {
+        console.error("[evalkit] export error:", err);
         resultCallback({ code: ExportResultCode.FAILED });
-      });
+      },
+    );
+  }
+
+  private async sendAll(spans: EncodedSpan[]): Promise<boolean> {
+    let ok = true;
+    for (const group of groupForRequests(spans, MAX_REQUEST_BYTES, this.maxRequestSpans)) {
+      if (this.disabled) return false;
+      const outcome = await this.send(group);
+      if (outcome === "sent") continue;
+      ok = false;
+      if (outcome === "halt") break;
+    }
+    return ok;
+  }
+
+  private async send(spans: EncodedSpan[]): Promise<Outcome> {
+    const res = await this.deliver(requestBody(spans));
+    if (!res) return "halt";
+    if (res.ok) {
+      this.authFailures = 0;
+      if (this.debug) {
+        const data = await res.json().catch(() => ({}));
+        console.log(`[evalkit] exported ${spans.length} span(s) — status: ${(data as { status?: string }).status}`);
+      } else {
+        // An unread body holds its connection, and one export can make several requests.
+        await discardBody(res);
+      }
+      return "sent";
+    }
+    const text = await res.text().catch(() => "(no body)");
+    if (res.status >= 500) {
+      console.error(`[evalkit] export failed ${res.status}: ${text}`);
+      return "halt";
+    }
+    if (res.status === 401 || res.status === 403) {
+      // One refusal per export, however many requests it takes: a receiver briefly unable to check keys must
+      // not use up the auth-failure limit within one large export.
+      this.onAuthFailure(res.status, text);
+      return "halt";
+    }
+    if (res.status === 413) {
+      if (spans.length > 1) {
+        const half = Math.floor(spans.length / 2);
+        const first = await this.send(spans.slice(0, half));
+        if (first === "halt") return first;
+        const second = await this.send(spans.slice(half));
+        return second === "sent" ? first : second;
+      }
+      console.warn(
+        `[evalkit] dropping span "${spans[0].operation}" (${spans[0].bytes} bytes): the receiver rejected it ` +
+          "as too large (HTTP 413)",
+      );
+      return "refused";
+    }
+    console.error(`[evalkit] export failed ${res.status}: ${text}`);
+    return "refused";
+  }
+
+  private async deliver(body: Buffer): Promise<Response | undefined> {
+    if (!this.gzip) return this.post(body, false);
+    const compressed = await this.post(await gzipAsync(body, { level: GZIP_LEVEL }), true);
+    if (!compressed || (compressed.status !== 400 && compressed.status !== 415)) return compressed;
+    // A receiver that predates compressed ingest answers 415, or 400 when it parses the gzip bytes as JSON.
+    // The same body sent uncompressed tells that 400 from one about the spans themselves, which the receiver
+    // refuses again.
+    await discardBody(compressed);
+    const plain = await this.post(body, false);
+    if (compressed.status === 415 || plain?.status !== 400) this.stopCompressing(compressed.status);
+    return plain;
+  }
+
+  private stopCompressing(status: number): void {
+    if (!this.gzip) return;
+    this.gzip = false;
+    console.warn(
+      `[evalkit] the receiver at ${this.url} does not accept gzip-compressed spans (HTTP ${status}); sending ` +
+        "them uncompressed from now on. Set EVALKIT_EXPORT_GZIP=false to skip the compressed attempt.",
+    );
+  }
+
+  private async post(body: Uint8Array, compressed: boolean): Promise<Response | undefined> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "X-Subscription-Key": this.subscriptionKey,
+    };
+    if (compressed) headers["Content-Encoding"] = "gzip";
+    try {
+      // Buffer.from and zlib return Buffers over a plain ArrayBuffer, the kind fetch's body type asks for.
+      return await this.fetchWithRetry(this.url, { method: "POST", headers, body: body as BodyInit });
+    } catch (err) {
+      console.error("[evalkit] export network error:", err);
+      return undefined;
+    }
+  }
+
+  private onAuthFailure(status: number, text: string): void {
+    this.authFailures++;
+    if (this.authFailures >= AUTH_FAIL_LIMIT) {
+      this.disabled = true;
+      console.error(
+        `[evalkit] export rejected ${status}: ${text} — disabling tracing after ` +
+        `${this.authFailures} consecutive auth failures; check your EvalKit subscription key.`,
+      );
+    } else if (this.debug) {
+      console.warn(`[evalkit] export rejected ${status} (auth failure ${this.authFailures}/${AUTH_FAIL_LIMIT})`);
+    }
   }
 
   private async fetchWithRetry(url: string, init: RequestInit, maxRetries = 3): Promise<Response> {
@@ -225,8 +341,12 @@ export class EvalKitExporter implements SpanExporter {
     }));
 
     const scope = scopeForSpan(span, ctx.traceId);
-    const agentName = agentNameOf(attrs) ?? scope.agentName;
-    const foreignLlm = !COUNT_FOREIGN_LLM && isForeignGenAi(attrs);
+    const declaredType = attrs["evalkit.span_type"] as TraceEnvelope["spanType"] | undefined;
+    // Another library's span that names a GenAI operation is typed by that operation; what the SDK
+    // created itself already says what it is.
+    const framework = declaredType === undefined ? frameworkSpanFields(span, COUNT_FOREIGN_LLM) : undefined;
+    const agentName = agentNameOf(attrs) ?? framework?.agentName ?? scope.agentName;
+    const foreignLlm = framework ? !framework.keepTokens : !COUNT_FOREIGN_LLM && isForeignGenAi(attrs);
     const cacheReadTokens = foreignLlm ? undefined : firstTokenCount(attrs, CACHE_READ_KEYS);
     const cacheCreationTokens = foreignLlm ? undefined : firstTokenCount(attrs, CACHE_CREATION_KEYS);
     const envelope: TraceEnvelope = {
@@ -235,15 +355,15 @@ export class EvalKitExporter implements SpanExporter {
 
       parentSpanId: (span as any).parentSpanContext?.spanId ?? (span as any).parentSpanId,
       spanKind: spanKindName(span.kind),
-      spanType: (attrs["evalkit.span_type"] as TraceEnvelope["spanType"]) ?? (foreignLlm ? "function_call" : inferSpanType(span, attrs)),
-      status: otelStatusToString(span.status.code),
+      spanType: declaredType ?? framework?.spanType ?? (foreignLlm ? "function_call" : inferSpanType(span, attrs)),
+      status: framework?.status ?? otelStatusToString(span.status.code),
       statusMessage: span.status.message,
       serviceName: this.serviceNameFor(span),
-      operation: span.name,
+      operation: framework?.operation ?? span.name,
       model: (attrs["gen_ai.response.model"] ?? attrs["gen_ai.request.model"]) as string | undefined,
       provider: (attrs["gen_ai.system"] || attrs["gen_ai.provider.name"]) as string | undefined,
-      prompt: attrs["evalkit.prompt"] as string | undefined,
-      completion: attrs["evalkit.completion"] as string | undefined,
+      prompt: (attrs["evalkit.prompt"] as string | undefined) ?? framework?.prompt,
+      completion: (attrs["evalkit.completion"] as string | undefined) ?? framework?.completion,
       tokensIn: foreignLlm
         ? undefined
         : foldExclusiveCache(firstTokenCount(attrs, TOKENS_IN_KEYS), cacheReadTokens, cacheCreationTokens),
@@ -255,7 +375,7 @@ export class EvalKitExporter implements SpanExporter {
       startTime: new Date(startMs).toISOString(),
       endTime: new Date(endMs).toISOString(),
       events: events.length > 0 ? events : undefined,
-      attributes: { ...buildAttributes(attrs), ...agentAttributes(agentName) },
+      attributes: { ...framework?.attributes, ...buildAttributes(attrs), ...agentAttributes(agentName) },
       createdAt: new Date(startMs).toISOString(),
       environment: attrs["evalkit.environment"] as string | undefined,
       appVersion: attrs["evalkit.app_version"] as string | undefined,
@@ -313,6 +433,56 @@ function inferSpanType(span: ReadableSpan, attrs: Record<string, unknown>): Trac
   if (/prisma|mongo|redis|mysql|postgres|\bpg\b|sql|cassandra|dynamo/.test(scope)) return "db_query";
   if (/http|fetch|undici|axios|grpc|got|request/.test(scope)) return "http_call";
   return "log";
+}
+
+function encodeEnvelope(env: TraceEnvelope, debug: boolean): EncodedSpan | null {
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(env);
+  } catch {
+    json = undefined;
+  }
+  if (json === undefined || json.length > MAX_SPAN_BYTES) {
+    const fitted = fitEnvelope(env, debug);
+    if (!fitted) return null;
+    try {
+      json = JSON.stringify(fitted);
+    } catch {
+      return null;
+    }
+  }
+  return { json, bytes: Buffer.byteLength(json, "utf8"), operation: env.operation ?? env.spanType };
+}
+
+/** Splits spans, in order, into request bodies of at most `maxSpans` spans and `maxBytes` of JSON. A span
+ * larger than `maxBytes` on its own travels alone. */
+function groupForRequests(spans: EncodedSpan[], maxBytes: number, maxSpans: number): EncodedSpan[][] {
+  const groups: EncodedSpan[][] = [];
+  let current: EncodedSpan[] = [];
+  let size = BODY_OVERHEAD;
+  for (const span of spans) {
+    if (current.length > 0 && (current.length >= maxSpans || size + 1 + span.bytes > maxBytes)) {
+      groups.push(current);
+      current = [];
+      size = BODY_OVERHEAD;
+    }
+    size += span.bytes + (current.length > 0 ? 1 : 0);
+    current.push(span);
+  }
+  if (current.length > 0) groups.push(current);
+  return groups;
+}
+
+function requestBody(spans: EncodedSpan[]): Buffer {
+  return Buffer.from(`{"events":[${spans.map((s) => s.json).join(",")}]}`, "utf8");
+}
+
+async function discardBody(res: Response): Promise<void> {
+  try {
+    await res.text();
+  } catch {
+
+  }
 }
 
 function fitEnvelope(env: TraceEnvelope, debug: boolean): TraceEnvelope | null {

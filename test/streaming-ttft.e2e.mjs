@@ -1,11 +1,12 @@
 import assert from 'node:assert';
+import { ingestBody } from './_ingest.mjs';
 import { init, patchGoogleGenAIModels } from '../dist/index.mjs';
 
 const TTFT = 'gen_ai.server.time_to_first_token_ms';
 const ingested = [];
 
 globalThis.fetch = async (_url, opts) => {
-  try { for (const e of JSON.parse(opts.body).events) ingested.push(e); } catch {}
+  try { for (const e of ingestBody(opts).events) ingested.push(e); } catch {}
   return { ok: true, status: 200, text: async () => 'ok' };
 };
 

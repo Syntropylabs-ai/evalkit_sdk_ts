@@ -4,8 +4,9 @@ import type { EvalKitClient } from "../../../core/client.js";
 import { emitToolCalls, fromOpenAIChat } from "../_toolcalls.js";
 import { safeBody } from "../_body.js";
 import { toolAttrs } from "../_request.js";
+import { messageContentText } from "../../../core/message-content.js";
 
-type Messages = Array<{ role: string; content: string | null }>;
+type Messages = Array<{ role: string; content: unknown }>;
 type ToolCall = {
   id: string;
   type: string;
@@ -231,6 +232,6 @@ export function patchOpenAI(
 
 function messagesToText(messages: Messages): string {
   return messages
-    .map((m) => `${m.role}: ${m.content ?? ""}`)
+    .map((m) => `${m.role}: ${messageContentText(m.content)}`)
     .join("\n");
 }

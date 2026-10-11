@@ -1,4 +1,5 @@
 import assert from 'node:assert';
+import { ingestBody } from './_ingest.mjs';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { EvalKitClient, scrubSecrets, isSecretKey } from '../dist/index.mjs';
@@ -6,7 +7,7 @@ import { EvalKitClient, scrubSecrets, isSecretKey } from '../dist/index.mjs';
 let ingested = [];
 
 globalThis.fetch = async (_url, opts) => {
-  try { for (const e of JSON.parse(opts.body).events) ingested.push(e); } catch {}
+  try { for (const e of ingestBody(opts).events) ingested.push(e); } catch {}
   return { ok: true, status: 200, text: async () => 'ok', json: async () => ({ status: 'ok' }) };
 };
 
@@ -85,9 +86,29 @@ const TELEMETRY_KEYS = [
   'token_usage',
   'input_token_details',
   'tokenizer',
+  'gen_ai.server.time_to_first_token',
+  'gen_ai.server.time_per_output_token',
+  'GEN_AI.SERVER.TIME_TO_FIRST_TOKEN',
+  'time-to-first-token',
+  'input_cost_per_token',
+  'output_cost_per_token',
+  'cost_per_token',
+  'gen_ai.usage.output_tokens',
+  'llm.usage.total_tokens',
+  'llm.token_count.prompt',
+  'gen_ai.request.max_tokens',
+  'max_tokens',
+  'max_completion_tokens',
+  'maxTokens',
 ];
 
-const SECRET_KEYS = ['apiKey', 'API_KEY', 'SubscriptionKey', 'Set-Cookie', 'AWS_SECRET_ACCESS_KEY', 'X-Auth-Token', 'access_token'];
+const SECRET_KEYS = [
+  'apiKey', 'API_KEY', 'SubscriptionKey', 'Set-Cookie', 'AWS_SECRET_ACCESS_KEY', 'X-Auth-Token', 'access_token',
+  // The time-to-first-token and per-token exemption is a vocabulary, not a loophole: any other key
+  // ending in token can still hold a credential.
+  'token', 'refresh_token', 'id_token', 'auth_token', 'csrf_token', 'session_token', 'bearer_token', 'api_token',
+  'github_token', 'oauth.token', 'x-access-token', 'first_token', 'per_user_token',
+];
 
 const PATTERN_CASES = [
   ['live subscription key', LIVE_KEY, 'tk_live_***'],
@@ -299,6 +320,21 @@ try {
   for (const key of SECRET_KEYS) {
     assert.ok(isSecretKey(key), `${key} must be read as a secret`);
   }
+
+  const bridged = {
+    'gen_ai.server.time_to_first_token': 0.42,
+    'gen_ai.server.time_per_output_token': 0.012,
+    'gen_ai.request.max_tokens': 256,
+    'gen_ai.usage.input_tokens': 120,
+    'gen_ai.usage.output_tokens': 30,
+    auth_token: 'abc123',
+  };
+  assert.deepStrictEqual(
+    scrubAttrs({ ...bridged }),
+    { ...bridged, auth_token: '***' },
+    'OpenTelemetry instrumentations report time-to-first-token as gen_ai.server.time_to_first_token; masking it ' +
+      "to *** drops the span's TTFT from every latency view"
+  );
 
   for (const [name, raw, expected] of PATTERN_CASES) {
     assert.deepStrictEqual(

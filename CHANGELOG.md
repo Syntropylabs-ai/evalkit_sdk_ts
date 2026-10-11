@@ -1,5 +1,84 @@
 # Changelog
 
+## 0.3.3 — 2026-10-11
+
+### Added
+- Export requests are gzip-compressed and sent with `Content-Encoding: gzip`. Pass
+  `exportGzip: false` to `init()`, or set `EVALKIT_EXPORT_GZIP=false`, to send plain JSON.
+  A receiver without compressed ingest, such as a trace service deployed before it, answers 415,
+  or 400 because it reads the gzip bytes as JSON. The SDK then sends the same request
+  uncompressed, and unless that is refused with 400 too, it sends every later request
+  uncompressed and logs one warning. Such a receiver loses no spans: it costs one extra request
+  per process. A 400 to both the compressed and the plain request is about the spans, so
+  compression stays on.
+- Spans inside a LangGraph node carry where they ran: `langgraph.node`, `langgraph.step` (an
+  integer), `langgraph.triggers` and `langgraph.checkpoint_ns`, copied from the metadata
+  LangGraph gives each run. This covers chain, chat-model, LLM, tool and retriever spans; the
+  chat-model, LLM and retriever callbacks now read the metadata LangChain passes them.
+  `langgraph.triggers` is a compact JSON array in a string, such as `["branch:to:agent"]`, the
+  same string the Python SDK writes. `langchain.tags` is unchanged.
+- `EvalRow` takes `traceId`, `sessionId`, `messages`, `tools` and `systemPrompt`, so agent
+  evaluators can score the agent's turns and tool calls. `traceId` or `sessionId` points at a
+  trace or session already recorded in the key's project and environment. `messages` (OpenAI
+  chat format) carries the conversation itself, with `tools` (OpenAI tool definitions) and
+  `systemPrompt` beside it. They are sent as top-level row keys when present, not inside
+  `metadata`, and the snake_case spellings `trace_id`, `session_id` and `system_prompt` are
+  accepted too. The new `ChatMessage`, `ChatToolCall` and `ToolDefinition` types describe the
+  shapes. A non-string or empty id, or `messages` or `tools` that is not an array, throws
+  naming the row before the run opens.
+
+### Changed
+- A batch is exported in requests of at most 4 MiB of JSON before compression, and never more
+  than `maxExportBatchSize` spans. A batch of large spans went out as one request, which could
+  pass the 10 MiB the ingest proxy accepts and be refused whole. The 4 MiB is counted in UTF-8
+  bytes, so text outside ASCII cannot push a request past it.
+- A 413 splits the request in half and sends each half again, down to a single span. A span
+  that is still refused is dropped with a warning that names it and gives its size in bytes. A
+  413 used to fail the whole batch.
+- When a request gets no answer, or only 5xx answers, after its 3 retries, the rest of that
+  batch is dropped instead of being sent into the same failure. A 401 or 403 ends the batch the
+  same way, so one batch counts as one auth failure, as before.
+- An incoming request's server span is named by the route the framework matched, settled when
+  the response finishes, with `http.route` set: Express's route with its router's mount path
+  (`GET /api/orders/:orderId`), NestJS's route on Express and on Fastify, and the Fastify
+  plugin's route. It was named by the raw path, so every id was an operation of its own, one row
+  each in the Services table. A request that matched no route keeps its raw path.
+- Outbound spans from `http`, `https` and axios are named by the method alone (`POST`), as
+  OpenTelemetry names a client span whose URL template is unknown. They were named by the path,
+  ids included. The full URL stays in `http.url`.
+- `startHttpTrace(...).end(status, { route })` names the span by the route and sets `http.route`.
+
+### Fixed
+- The secret scrubber no longer masks `gen_ai.server.time_to_first_token` and
+  `gen_ai.server.time_per_output_token` on bridged OpenTelemetry spans, nor per-token prices
+  such as `input_cost_per_token`. A key ending in `token` was read as a credential, so those
+  values arrived as `***` and the span lost its time to first token. Every other key ending in
+  `token` (`access_token`, `refresh_token`, `id_token`, `csrf_token`, `token`) is still masked.
+  Usage counts and `max_tokens` end in `tokens` and were never masked.
+- Spans from an agent framework on the OpenTelemetry GenAI conventions (Strands Agents, or any
+  framework whose spans carry `gen_ai.operation.name`) are typed by that operation. They were all
+  stored as `function_call`, so the trace views counted no tool calls and no model calls for them.
+  - `invoke_agent` (and `invoke_swarm`, `invoke_graph`) is an `agent` span, named by
+    `gen_ai.agent.name` or the span name (`invoke_agent refund-agent`). Its prompt is the last user
+    message and its completion the reply. It carries no token counts, because those repeat the
+    model calls inside it.
+  - `execute_tool` is a `tool_call` named by its tool. `tool.arguments` and `tool.result` come from
+    `gen_ai.tool.call.arguments` / `.result`, or else from the `gen_ai.tool.message` and
+    `gen_ai.choice` events, with content blocks unwrapped to their text. `gen_ai.tool.status: error`
+    marks it failed.
+  - `chat`, `generate_content` and `text_completion` are an `llm_call` with model, prompt,
+    completion and tokens. The exception is when the SDK's own instrumentation recorded the same
+    request, inside the framework's span or around it. The SDK's span is then the model call, and
+    the framework's is stored as `internal` without tokens, so the call is counted once.
+    `EVALKIT_COUNT_FOREIGN_LLM=1` still counts both.
+  - `execute_event_loop_cycle` is an `internal` span: neither a model call nor a tool call.
+  - A `gen_ai.*` span that names no operation keeps the earlier handling (`function_call`, tokens
+    withheld).
+- The OpenAI and Anthropic model-call spans read content blocks in a request as their text. A
+  message sent as `[{ type: "text", text: ... }]`, or an Anthropic `system` given as blocks, was
+  stored as `[object Object]`. Blocks that are not text, such as tool use and tool results, are
+  kept as JSON, and image and file blocks are named instead of inlined.
+
 ## 0.3.2 — 2026-10-02
 
 ### Added

@@ -329,7 +329,55 @@ A server too old for collections is detected when the run opens. The SDK then th
 2. `POST /evaluation-runs/{runId}/rows` appends the rows in batches of at most 200 (`batchSize`, clamped to the server's cap). Every row carries its absolute `rowIndex`, so the server recognizes a row it already has. The SDK retries a failed batch twice, on a network error or a 5xx, with the identical payload, and nothing is counted twice.
 3. `POST /evaluation-runs/{runId}/complete` judges every row, applies the gate over the whole run and compares it with the baseline. However many batches were uploaded, there is one job, one gate verdict and one comparison.
 
-A row has the fields `input`, `output` (or a `task` that produces it), `expected` (`target` is still accepted), `metadata` and `context`. `context` is sent inside `metadata.context`.
+A row has the fields `input`, `output` (or a `task` that produces it), `expected` (`target` is still accepted), `metadata` and `context`. `context` is sent inside `metadata.context`. Agent rows add `traceId`, `sessionId`, `messages`, `tools` and `systemPrompt`, described next.
+
+### Agent rows
+
+Agent evaluators score the agent's turns and tool calls, not only its final answer. A row can give them those in one of three ways. On every kind of row, `input`, `output` and `expected` still feed the row-level metrics.
+
+- A trace or session: `traceId` or `sessionId` points at a trace or session already recorded in the same project and environment as your subscription key. The server rebuilds the agent's turns, its tool calls with their arguments and results, the tools it declared and its system prompt, and scores the agent metrics on that. A trace that has not arrived yet (ingest lag) skips the agent metrics on that row, with a reason that says so.
+- The conversation itself: `messages` in OpenAI chat format, with `tools` (OpenAI tool definitions) and `systemPrompt` when you have them. Every agent metric can run on it, Parameter Validation included.
+- Text only: a row with neither skips the agent metrics with the reason "This row has only text. Pass trace_id, session_id or messages to evaluate the agent's turns and tool calls."
+
+Point at a session your agent already traced:
+
+```ts
+const rows = [{ input: "Where is order 42?", output: "It shipped on Monday.", sessionId: "sess_8f2c" }];
+```
+
+Or pass the conversation, with its tool call and the tool's result:
+
+```ts
+import type { EvalRow } from "syntropylabs-evalkit";
+
+const rows: EvalRow[] = [{
+  input: "Where is order 42?",
+  output: "Order 42 shipped on Monday.",
+  systemPrompt: "You are a support agent. Look an order up before you answer.",
+  tools: [{
+    type: "function",
+    function: {
+      name: "lookup_order",
+      description: "Find an order by id",
+      parameters: { type: "object", properties: { order_id: { type: "string" } }, required: ["order_id"] },
+    },
+  }],
+  messages: [
+    { role: "user", content: "Where is order 42?" },
+    { role: "assistant", content: null, tool_calls: [
+      { id: "call_1", type: "function", function: { name: "lookup_order", arguments: '{"order_id":"42"}' } },
+    ] },
+    { role: "tool", tool_call_id: "call_1", content: '{"status":"shipped","date":"Monday"}' },
+    { role: "assistant", content: "Order 42 shipped on Monday." },
+  ],
+}];
+
+await Eval({ name: "support-agent", data: rows, evaluators: ["665f0c1234567890abcdef12"] });
+```
+
+The fields travel as top-level row keys, never inside `metadata`, and an empty string or array is left out. The snake_case spellings `trace_id`, `session_id` and `system_prompt` are accepted too, so one JSONL dataset works with both CLIs. The SDK checks only the shape: `traceId` and `sessionId` must be non-empty strings, `messages` and `tools` arrays and `systemPrompt` a string. Anything else throws, naming the row, before the run opens. The fallback for older servers does not carry these fields.
+
+With SDK 0.3.2, put the same fields in `metadata` under their snake_case names (`metadata: { session_id: "sess_8f2c" }`). The server reads them there too.
 
 ### Local scorers
 
@@ -698,10 +746,11 @@ With the scrubber off, credential headers are recorded exactly as they were sent
 | `captureContent` | Capture prompts, bodies and arguments. On by default, see [Privacy](#privacy-content-capture-and-masking) |
 | `captureSecrets` | Record credentials instead of masking them. Off by default, see [Privacy](#privacy-content-capture-and-masking) |
 | `mask` | `(envelope) => envelope \| null`, which rewrites or drops each span before export |
+| `exportGzip` | Gzip each export request. On by default. A receiver that refuses compressed requests is sent uncompressed ones from then on |
 
 The exported `EvalKitOptions` type has the full set, including `appVersion`, `deviceId`, `debug` and the batch settings.
 
-`EVALKIT_API_URL` overrides the control-plane base URL for `Eval()`, feedback and prompts. `EVALKIT_QUIET=1` silences the evaluation-run link, and `EVALKIT_CAPTURE_SECRETS=1` turns off secret masking.
+`EVALKIT_API_URL` overrides the control-plane base URL for `Eval()`, feedback and prompts. `EVALKIT_QUIET=1` silences the evaluation-run link, `EVALKIT_CAPTURE_SECRETS=1` turns off secret masking, and `EVALKIT_EXPORT_GZIP=false` sends export requests uncompressed. The `exportGzip` option wins over the variable.
 
 ## Coexisting with an OpenTelemetry setup you already have
 

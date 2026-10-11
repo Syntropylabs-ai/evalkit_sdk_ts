@@ -68,6 +68,26 @@ function invocationAttrs(extraParams: any): Record<string, number | string[]> {
   }
 }
 
+/** Where in a LangGraph run a span sits, from the metadata LangGraph gives every run inside a node. The
+ * triggers go out as a compact JSON array, the same string the Python SDK writes for them. */
+function langgraphAttrs(metadata: any): Record<string, string | number> {
+  const out: Record<string, string | number> = {};
+  try {
+    if (!metadata || typeof metadata !== "object") return out;
+    if (metadata.langgraph_node) out["langgraph.node"] = String(metadata.langgraph_node);
+    if (Number.isInteger(metadata.langgraph_step)) out["langgraph.step"] = metadata.langgraph_step;
+    const raw = metadata.langgraph_triggers;
+    const triggers = typeof raw === "string" ? [raw] : raw;
+    if (Array.isArray(triggers) && triggers.length > 0) {
+      out["langgraph.triggers"] = JSON.stringify(triggers.map((t) => String(t)));
+    }
+    if (metadata.langgraph_checkpoint_ns) out["langgraph.checkpoint_ns"] = String(metadata.langgraph_checkpoint_ns);
+  } catch {
+    return {};
+  }
+  return out;
+}
+
 function messagesToPrompt(messages: any): string {
   try {
     const batch = Array.isArray(messages?.[0]) ? messages[0] : messages;
@@ -150,31 +170,36 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
   }
 
   return {
-    handleChainStart(chain: any, _inputs: any, runId: string, parentRunId?: string, tags?: string[], _metadata?: any, _runType?: string, name?: string) {
+    handleChainStart(chain: any, _inputs: any, runId: string, parentRunId?: string, tags?: string[], metadata?: any, _runType?: string, name?: string) {
       const label = name ?? chain?.id?.[chain.id.length - 1] ?? "chain";
-      startRun(runId, parentRunId, "function_call", String(label), tags?.length ? { "langchain.tags": tags.join(",") } : {});
+      startRun(runId, parentRunId, "function_call", String(label), {
+        ...(tags?.length ? { "langchain.tags": tags.join(",") } : {}),
+        ...langgraphAttrs(metadata),
+      });
     },
     handleChainEnd(_outputs: any, runId: string) { endRun(runId, "OK"); },
     handleChainError(err: any, runId: string) { endRun(runId, "ERROR", undefined, String(err?.message ?? err)); },
 
-    handleLLMStart(llm: any, prompts: string[], runId: string, parentRunId?: string, extraParams?: any) {
+    handleLLMStart(llm: any, prompts: string[], runId: string, parentRunId?: string, extraParams?: any, _tags?: string[], metadata?: any) {
       const model = modelFrom(llm, extraParams);
       const reqBody = safeBody({ prompts: prompts ?? [], invocation_params: extraParams?.invocation_params });
       startRun(runId, parentRunId, "llm_call", "llm.generate", {
         "gen_ai.request.model": model,
         "gen_ai.system": providerFrom(llm) ?? "",
         ...invocationAttrs(extraParams),
+        ...langgraphAttrs(metadata),
         "evalkit.prompt": truncate((prompts ?? []).join("\n")),
         ...(reqBody ? { "gen_ai.request.body": reqBody } : {}),
       });
     },
-    handleChatModelStart(llm: any, messages: any, runId: string, parentRunId?: string, extraParams?: any) {
+    handleChatModelStart(llm: any, messages: any, runId: string, parentRunId?: string, extraParams?: any, _tags?: string[], metadata?: any) {
       const model = modelFrom(llm, extraParams);
       const reqBody = safeBody({ messages, invocation_params: extraParams?.invocation_params });
       startRun(runId, parentRunId, "llm_call", "chat.generate", {
         "gen_ai.request.model": model,
         "gen_ai.system": providerFrom(llm) ?? "",
         ...invocationAttrs(extraParams),
+        ...langgraphAttrs(metadata),
         "evalkit.prompt": messagesToPrompt(messages),
         ...(reqBody ? { "gen_ai.request.body": reqBody } : {}),
       });
@@ -197,18 +222,22 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
     },
     handleLLMError(err: any, runId: string) { endRun(runId, "ERROR", undefined, String(err?.message ?? err)); },
 
-    handleToolStart(tool: any, input: string, runId: string, parentRunId?: string, _tags?: string[], _metadata?: any, name?: string) {
+    handleToolStart(tool: any, input: string, runId: string, parentRunId?: string, _tags?: string[], metadata?: any, name?: string) {
       const label = name ?? tool?.id?.[tool.id.length - 1] ?? "tool";
       const rec = runs.get(parentRunId ?? "");
       recordSimToolCall(rec?.span.spanContext().traceId, String(label));
-      startRun(runId, parentRunId, "tool_call", String(label), { "tool.name": String(label), "tool.arguments": truncate(input) });
+      startRun(runId, parentRunId, "tool_call", String(label), {
+        "tool.name": String(label),
+        "tool.arguments": truncate(input),
+        ...langgraphAttrs(metadata),
+      });
     },
     handleToolEnd(output: any, runId: string) { endRun(runId, "OK", { "tool.result": truncate(output) }); },
     handleToolError(err: any, runId: string) { endRun(runId, "ERROR", undefined, String(err?.message ?? err)); },
 
-    handleRetrieverStart(retriever: any, query: string, runId: string, parentRunId?: string) {
+    handleRetrieverStart(retriever: any, query: string, runId: string, parentRunId?: string, _tags?: string[], metadata?: any) {
       const label = retriever?.id?.[retriever.id.length - 1] ?? "retriever";
-      startRun(runId, parentRunId, "db_query", String(label), { "retriever.query": truncate(query) });
+      startRun(runId, parentRunId, "db_query", String(label), { "retriever.query": truncate(query), ...langgraphAttrs(metadata) });
     },
     handleRetrieverEnd(documents: any, runId: string) {
       const count = Array.isArray(documents) ? documents.length : 0;

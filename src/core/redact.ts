@@ -40,7 +40,7 @@ export const CONTENT_ATTRIBUTES: ReadonlySet<string> = new Set([
 const TRUTHY = new Set(["1", "true", "yes", "on"]);
 const FALSY = new Set(["0", "false", "no", "off"]);
 
-function envFlag(name: string): boolean | undefined {
+export function envFlag(name: string): boolean | undefined {
   const raw = process.env[name];
   if (raw === undefined) return undefined;
   const value = raw.trim().toLowerCase();

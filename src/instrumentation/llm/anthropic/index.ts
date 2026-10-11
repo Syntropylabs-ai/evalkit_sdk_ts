@@ -4,8 +4,9 @@ import type { EvalKitClient } from "../../../core/client.js";
 import { emitToolCalls, fromAnthropicBlocks } from "../_toolcalls.js";
 import { safeBody } from "../_body.js";
 import { toolAttrs } from "../_request.js";
+import { messageContentText } from "../../../core/message-content.js";
 
-type AnthropicMessages = Array<{ role: string; content: string }>;
+type AnthropicMessages = Array<{ role: string; content: unknown }>;
 type ContentBlock = { type: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown };
 type Message = {
   id: string;
@@ -228,9 +229,9 @@ export function patchAnthropic(
   (messages.create as { __evalkit?: boolean }).__evalkit = true;
 }
 
-function buildPrompt(system: string | undefined, messages: AnthropicMessages): string {
+function buildPrompt(system: unknown, messages: AnthropicMessages): string {
   const parts: string[] = [];
-  if (system) parts.push(`system: ${system}`);
-  parts.push(...messages.map((m) => `${m.role}: ${m.content}`));
+  if (system) parts.push(`system: ${messageContentText(system)}`);
+  parts.push(...messages.map((m) => `${m.role}: ${messageContentText(m.content)}`));
   return parts.join("\n");
 }

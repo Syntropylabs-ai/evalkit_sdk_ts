@@ -66,7 +66,7 @@ export { evaluate } from "./evaluate.js";
 export type { OfflineEvalInput, OfflineEvalResult, OfflineMetric } from "./evaluate.js";
 
 export { EvalResult } from "./eval.js";
-export type { EvalOptions, EvalRow, EvalRowResult, EvalGate, EvalSummary, LocalEvaluator, LocalScore, LocalScoreValue } from "./eval.js";
+export type { ChatMessage, ChatToolCall, EvalOptions, EvalRow, EvalRowResult, EvalGate, EvalSummary, LocalEvaluator, LocalScore, LocalScoreValue, ToolDefinition } from "./eval.js";
 export type { Identity, SessionScope } from "./core/identity.js";
 export type { StartTraceOptions } from "./core/client.js";
 export type { FeedbackOptions, FeedbackResult, FeedbackKind } from "./feedback.js";

@@ -2,6 +2,7 @@ import { trace, context as otelContext, SpanKind, SpanStatusCode } from '@opente
 import type { EvalKitClient } from '../../core/client.js';
 import { sanitizeHeaders } from '../../utils/headers.js';
 import { _evalkitAxiosSpanMap } from '../../utils/axios-span-map.js';
+import { clientSpanName } from '../../utils/http-route.js';
 
 const SKIP_PATTERNS = [/\/v1\/ingest/, /\/health(z)?$/];
 
@@ -39,15 +40,12 @@ export function patchAxios(client: EvalKitClient, axiosInstance: any): void {
     const activeSpan = trace.getActiveSpan();
     if (!activeSpan?.isRecording()) return config;
 
-    let pathname = config.url ?? '';
-    try { pathname = new URL(url, config.baseURL ?? 'http://localhost').pathname; } catch { }
-
     const method = (config.method ?? 'get').toUpperCase();
     const reqHeaders = sanitizeHeaders(config.headers ?? {});
     const reqHeadersStr = Object.keys(reqHeaders).length ? safeStringify(reqHeaders) : undefined;
     const reqBody = captureBody(config.data, client.options.maxBodyBytes);
 
-    const span = client.tracer.startSpan(`${method} ${pathname}`, {
+    const span = client.tracer.startSpan(clientSpanName(method), {
       kind: SpanKind.CLIENT,
       attributes: {
         'evalkit.span_type': 'http_call',

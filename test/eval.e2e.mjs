@@ -341,6 +341,61 @@ try {
   assert.ok(Math.abs(many.passRate - 0.625) < 1e-9);
   assert.ok(Math.abs(many.averageScore - 0.7125) < 1e-9);
   assert.strictEqual(many.localScores.lengthScorer.length, 450);
+
+  fresh();
+  server.reset();
+  const tools = [{ type: 'function', function: { name: 'lookup_order', description: 'Find an order by id', parameters: { type: 'object', properties: { order_id: { type: 'string' } } } } }];
+  const messages = [
+    { role: 'user', content: 'Where is order 42?' },
+    { role: 'assistant', content: null, tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'lookup_order', arguments: '{"order_id":"42"}' } }] },
+    { role: 'tool', tool_call_id: 'call_1', content: '{"status":"shipped"}' },
+    { role: 'assistant', content: 'Order 42 has shipped.' },
+  ];
+  await Eval({
+    name: 'agent',
+    evaluators: [RULE],
+    data: [
+      { input: 'q0', output: 'a0', traceId: '4bf92f3577b34da6a3ce929d0e0e4736' },
+      { input: 'q1', output: 'a1', sessionId: 'sess_1', metadata: { tier: 'pro' } },
+      { input: 'Where is order 42?', output: 'Order 42 has shipped.', messages, tools, systemPrompt: 'You are a support agent.' },
+      { input: 'q3', output: 'a3', trace_id: 't3', session_id: 's3', system_prompt: 'snake' },
+      { input: 'q4', output: 'a4', messages: [], tools: [], systemPrompt: '', traceId: null },
+      { input: 'q5', output: 'a5' },
+    ],
+  });
+  const agentRows = server.bodies('/rows')[0].rows;
+  assert.deepStrictEqual(agentRows[0], { rowIndex: 0, input: 'q0', output: 'a0', traceId: '4bf92f3577b34da6a3ce929d0e0e4736' });
+  assert.deepStrictEqual(agentRows[1], { rowIndex: 1, input: 'q1', output: 'a1', sessionId: 'sess_1', metadata: { tier: 'pro' } });
+  assert.deepStrictEqual(agentRows[2], {
+    rowIndex: 2, input: 'Where is order 42?', output: 'Order 42 has shipped.', messages, tools, systemPrompt: 'You are a support agent.',
+  });
+  assert.deepStrictEqual(agentRows[3], { rowIndex: 3, input: 'q3', output: 'a3', traceId: 't3', sessionId: 's3', systemPrompt: 'snake' });
+  assert.deepStrictEqual(agentRows[4], { rowIndex: 4, input: 'q4', output: 'a4' });
+  assert.deepStrictEqual(agentRows[5], { rowIndex: 5, input: 'q5', output: 'a5' });
+
+  const badAgentRows = [
+    [{ traceId: 42 }, TypeError, /data\[1\]\.traceId must be a string/],
+    [{ sessionId: '' }, Error, /data\[1\]\.sessionId is empty/],
+    [{ trace_id: '   ' }, Error, /data\[1\]\.trace_id is empty/],
+    [{ messages: 'hello' }, TypeError, /data\[1\]\.messages must be an array/],
+    [{ tools: { type: 'function' } }, TypeError, /data\[1\]\.tools must be an array/],
+    [{ systemPrompt: ['a'] }, TypeError, /data\[1\]\.systemPrompt must be a string/],
+  ];
+  for (const [extra, type, message] of badAgentRows) {
+    server.reset();
+    await assert.rejects(
+      () => Eval({ name: 'x', data: [{ input: 'q0', output: 'a0' }, { input: 'q1', output: 'a1', ...extra }], evaluators: [RULE] }),
+      (err) => err instanceof type && message.test(err.message),
+      JSON.stringify(extra),
+    );
+    assert.deepStrictEqual(server.paths(), [], 'a malformed row is refused before the run opens');
+  }
+  let taskCalls = 0;
+  await assert.rejects(
+    () => Eval({ name: 'x', data: [{ input: 'q0', messages: 'hello' }], task: () => { taskCalls += 1; return 'a'; }, evaluators: [RULE] }),
+    TypeError,
+  );
+  assert.strictEqual(taskCalls, 0, 'a malformed row is refused before the task runs');
 } catch (err) {
   fail(err.stack ?? err.message);
 }

@@ -1,12 +1,13 @@
 import http from 'node:http';
 import assert from 'node:assert';
+import { ingestBody } from './_ingest.mjs';
 import { init } from '../dist/index.mjs';
 
 const KNOWN = new Set(['llm_call', 'tool_call', 'log', 'http_call', 'function_call', 'db_query', 'eval_result']);
 const captured = [];
 
 globalThis.fetch = async (_url, opts) => {
-  try { for (const e of JSON.parse(opts.body).events) captured.push(e); } catch {}
+  try { for (const e of ingestBody(opts).events) captured.push(e); } catch {}
   return { ok: true, status: 200, text: async () => 'ok' };
 };
 

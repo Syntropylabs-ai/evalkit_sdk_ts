@@ -11,6 +11,7 @@ import { EvalKitExporter } from "./exporter.js";
 import type { MaskHook } from "./redact.js";
 import { activePromptRef, promptAttributes } from "./prompt-context.js";
 import { captureStartScope } from "./identity.js";
+import { noteSpanEnd, noteSpanStart } from "./framework-spans.js";
 
 export interface SpanPipelineOptions {
   baseUrl: string;
@@ -21,6 +22,7 @@ export interface SpanPipelineOptions {
   scheduledDelayMillis: number;
   captureContent: boolean;
   captureSecrets: boolean;
+  exportGzip: boolean;
   mask?: MaskHook;
 }
 
@@ -53,6 +55,11 @@ class ContextStampingProcessor implements SpanProcessor {
     } catch {
 
     }
+    try {
+      noteSpanStart(span);
+    } catch {
+
+    }
     if (span.attributes["evalkit.span_type"] === "llm_call") {
       const ref = activePromptRef(parentContext);
       if (ref) {
@@ -65,6 +72,12 @@ class ContextStampingProcessor implements SpanProcessor {
   }
 
   onEnd(span: ReadableSpan): void {
+    // Before the batch processor: a framework's model-call span is classified at export by what ended inside it.
+    try {
+      noteSpanEnd(span);
+    } catch {
+
+    }
     this.inner.onEnd(span);
   }
 
@@ -85,6 +98,8 @@ export function createSpanProcessor(opts: SpanPipelineOptions): SpanProcessor {
     debug: opts.debug,
     captureContent: opts.captureContent,
     captureSecrets: opts.captureSecrets,
+    exportGzip: opts.exportGzip,
+    maxExportBatchSize: opts.maxExportBatchSize,
     mask: opts.mask,
   });
   const batch = new BatchSpanProcessor(exporter, {

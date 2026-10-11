@@ -1,6 +1,7 @@
 import { context as otelContext, trace as otelTrace } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
 import { extractTraceparent } from '../../core/context.js';
+import { serverRoute } from '../../utils/http-route.js';
 
 export interface ExpressMiddlewareOptions {
   name?: string | ((req: any) => string);
@@ -70,6 +71,8 @@ export function createExpressMiddleware(
         statusCode: sc,
         headers: res.getHeaders ? res.getHeaders() as Record<string, string> : undefined,
         body: responseBody,
+        // Express matches the route after this middleware ran, so it is read when the response ends.
+        route: options?.name === undefined ? serverRoute(req) : undefined,
       });
       return origEnd.apply(res, args);
     };

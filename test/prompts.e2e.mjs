@@ -1,4 +1,5 @@
 import assert from 'node:assert';
+import { ingestBody } from './_ingest.mjs';
 import evalkit, { Prompt, withPrompt, compileTemplate, variablesOf } from '../dist/index.mjs';
 
 const PAYLOAD = {
@@ -26,7 +27,7 @@ globalThis.fetch = async (url, opts = {}) => {
     }
     return { ok: true, status: 200, text: async () => '', json: async () => body };
   }
-  try { for (const e of JSON.parse(opts.body).events) captured.push(e); } catch {}
+  try { for (const e of ingestBody(opts).events) captured.push(e); } catch {}
   return { ok: true, status: 200, text: async () => 'ok' };
 };
 

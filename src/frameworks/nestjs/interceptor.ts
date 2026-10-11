@@ -1,5 +1,6 @@
 import { context as otelContext } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
+import { serverRoute, setServerRoute } from '../../utils/http-route.js';
 
 export class EvalKitInterceptor {
   private client: EvalKitClient;
@@ -14,7 +15,13 @@ export class EvalKitInterceptor {
 
     const req = httpCtx.getRequest();
     const res = httpCtx.getResponse();
-    const traceName = `${String(req.method ?? 'GET')} ${String(req.route?.path ?? req.path ?? req.url ?? '/')}`;
+    // Nest has routed the request by the time an interceptor runs: on Express the route is on the
+    // request; on Fastify on `routeOptions.url` (`routerPath` before Fastify 4). The server span the
+    // http instrumentation opened for the request is named by it too.
+    const fastifyRoute = req.routeOptions?.url ?? req.routerPath;
+    if (req.raw) setServerRoute(req.raw, fastifyRoute);
+    const route = serverRoute(req) ?? (typeof fastifyRoute === 'string' ? fastifyRoute : undefined);
+    const traceName = `${String(req.method ?? 'GET')} ${String(route ?? req.path ?? req.url ?? '/')}`;
 
     const { ctx, end } = this.client.startHttpTrace(traceName, {
       method: String(req.method ?? 'GET'),

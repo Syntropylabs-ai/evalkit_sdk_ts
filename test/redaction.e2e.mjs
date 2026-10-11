@@ -1,4 +1,5 @@
 import assert from 'node:assert';
+import { ingestBody } from './_ingest.mjs';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { EvalKitClient } from '../dist/index.mjs';
@@ -6,7 +7,7 @@ import { EvalKitClient } from '../dist/index.mjs';
 let ingested = [];
 
 globalThis.fetch = async (_url, opts) => {
-  try { for (const e of JSON.parse(opts.body).events) ingested.push(e); } catch {}
+  try { for (const e of ingestBody(opts).events) ingested.push(e); } catch {}
   return { ok: true, status: 200, text: async () => 'ok', json: async () => ({ status: 'ok' }) };
 };
 

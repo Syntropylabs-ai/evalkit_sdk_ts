@@ -1,13 +1,16 @@
 const http = require("http");
 const assert = require("assert");
+const { gunzipSync } = require("zlib");
 
 const captured = [];
 const server = http.createServer((req, res) => {
-  let body = "";
-  req.on("data", (c) => (body += c));
+  const chunks = [];
+  req.on("data", (c) => chunks.push(c));
   req.on("end", () => {
     try {
-      const j = JSON.parse(body);
+      const raw = Buffer.concat(chunks);
+      const body = req.headers["content-encoding"] === "gzip" ? gunzipSync(raw) : raw;
+      const j = JSON.parse(body.toString("utf8"));
       if (Array.isArray(j.events)) captured.push(...j.events);
     } catch {}
     res.writeHead(200, { "Content-Type": "application/json" });

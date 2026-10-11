@@ -1,6 +1,7 @@
 import { context as otelContext, trace } from '@opentelemetry/api';
 import type { Context as OtelContext } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
+import { setServerRoute } from '../../utils/http-route.js';
 
 export interface FastifyPluginOptions {
   name?: string | ((request: any) => string);
@@ -28,6 +29,7 @@ export function createFastifyPlugin(
           request.routeOptions?.url ??
           request.url ??
           '/';
+        setServerRoute(request.raw, request.routeOptions?.url ?? request.routerPath);
         const traceName =
           typeof resolvedOpts.name === 'function'
             ? resolvedOpts.name(request)

@@ -27,6 +27,28 @@ export interface LocalScore {
   reason?: string;
 }
 
+/** A tool call on an assistant message, in OpenAI chat format. `arguments` is a JSON string. */
+export interface ChatToolCall {
+  id?: string;
+  type?: string;
+  function?: { name: string; arguments?: string };
+}
+
+/** One conversation turn in OpenAI chat format. A `tool` message names the call it answers in `tool_call_id`. */
+export interface ChatMessage {
+  role: "system" | "user" | "assistant" | "tool" | (string & {});
+  content?: string | unknown[] | null;
+  tool_calls?: ChatToolCall[];
+  tool_call_id?: string;
+  name?: string;
+}
+
+/** A tool the agent could call, in OpenAI format. `parameters` is a JSON schema. */
+export interface ToolDefinition {
+  type?: string;
+  function?: { name: string; description?: string; parameters?: Record<string, unknown> };
+}
+
 export interface EvalRow {
   input: unknown;
   output?: string;
@@ -35,8 +57,29 @@ export interface EvalRow {
   /** The row's retrieved documents: one string or a list of them. */
   context?: string | unknown[];
   metadata?: Record<string, unknown>;
+  /** A trace already recorded in the key's project and environment, scored by the agent metrics. */
+  traceId?: string;
+  /** A session already recorded in the key's project and environment, scored by the agent metrics. */
+  sessionId?: string;
+  /** The conversation itself, scored by the agent metrics. */
+  messages?: ChatMessage[];
+  /** The tools the agent could call in `messages`. */
+  tools?: ToolDefinition[];
+  systemPrompt?: string;
   [key: string]: unknown;
 }
+
+// Row fields that let the server score the agent's turns and tool calls. The
+// snake_case spelling is what a Python dataset uses, so one JSONL file serves both CLIs.
+const AGENT_FIELDS = [
+  ["traceId", "trace_id"],
+  ["sessionId", "session_id"],
+  ["messages", "messages"],
+  ["tools", "tools"],
+  ["systemPrompt", "system_prompt"],
+] as const;
+const AGENT_IDS = new Set<string>(["traceId", "sessionId"]);
+const AGENT_LISTS = new Set<string>(["messages", "tools"]);
 
 export interface EvalGate {
   minPassRate?: number;
@@ -235,12 +278,33 @@ function collectionIdsOf(collections: readonly string[]): string[] {
   });
 }
 
+// Only the shape is checked here: the server reads the messages and tools and
+// reports a row it cannot use, so a deep check would only duplicate it.
+function agentFields(row: EvalRow, index: number): Record<string, unknown> {
+  const fields: Record<string, unknown> = {};
+  for (const [key, alias] of AGENT_FIELDS) {
+    const name = row[key] !== undefined && row[key] !== null ? key : alias;
+    const value = row[name];
+    if (value === undefined || value === null) continue;
+    if (AGENT_LISTS.has(key)) {
+      if (!Array.isArray(value)) throw new TypeError(`data[${index}].${name} must be an array, got ${typeof value}`);
+    } else if (typeof value !== "string") {
+      throw new TypeError(`data[${index}].${name} must be a string, got ${typeof value}`);
+    } else if (AGENT_IDS.has(key) && !value.trim()) {
+      throw new Error(`data[${index}].${name} is empty; pass an id or leave the field out`);
+    }
+    if ((value as string | unknown[]).length) fields[key] = AGENT_LISTS.has(key) ? [...(value as unknown[])] : value;
+  }
+  return fields;
+}
+
 function buildRows(data: Iterable<EvalRow>, task?: (row: EvalRow) => string): { source: EvalRow[]; outputs: string[] } {
   const source: EvalRow[] = [];
   const outputs: string[] = [];
   let index = 0;
   for (const row of data) {
     if (row.input === undefined || row.input === null) throw new Error(`data[${index}] has no 'input'`);
+    agentFields(row, index);
     const output = task ? task(row) : row.output;
     if (output === undefined || output === null) throw new Error(`data[${index}] has no 'output' and no task was given`);
     source.push(row);
@@ -380,6 +444,7 @@ class RunRows {
       const item: Record<string, unknown> = { rowIndex: index, input: row.input, output: this.outputs[index] };
       const expected = row.expected ?? row.target;
       if (expected !== undefined && expected !== null) item.expected = expected;
+      Object.assign(item, agentFields(row, index));
       const metadata = rowMetadata(row);
       if (Object.keys(metadata).length) item.metadata = metadata;
       if (this.localEntries[index].length) item.localScores = this.localEntries[index];

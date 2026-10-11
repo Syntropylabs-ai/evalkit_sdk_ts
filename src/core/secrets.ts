@@ -6,6 +6,15 @@ export const SECRET_KEY_RE =
 
 export const SECRET_TOKEN_KEY_RE = /(?:^|[._-])token$/i;
 
+// Keys that end in "token" because they measure or price tokens rather than hold
+// one: OpenTelemetry's gen_ai.server.time_to_first_token and
+// gen_ai.server.time_per_output_token on bridged spans, and per-token prices such
+// as input_cost_per_token. Masking them blanks out time-to-first-token and cost
+// and protects nothing, since no credential is named "to first token" or
+// "per ... token".
+export const TELEMETRY_TOKEN_KEY_RE =
+  /(?:^|[._-])(?:to[._-]first|per(?:[._-](?:input|output|prompt|completion|generated))?)[._-]token$/i;
+
 export const SECRET_QUERY_KEY_RE = /(?:^|[._-])(key|sig|signature)$/i;
 
 export const SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
@@ -36,7 +45,8 @@ const URL_RE = /^(?:https?|wss?):\/\/\S+$/i;
 const MAX_DEPTH = 12;
 
 export function isSecretKey(key: string, headerLike = false): boolean {
-  if (SECRET_KEY_RE.test(key) || SECRET_TOKEN_KEY_RE.test(key)) return true;
+  if (SECRET_KEY_RE.test(key)) return true;
+  if (SECRET_TOKEN_KEY_RE.test(key) && !TELEMETRY_TOKEN_KEY_RE.test(key)) return true;
   return headerLike && SENSITIVE_HEADER_RE.test(key);
 }
 

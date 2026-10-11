@@ -6,6 +6,7 @@ import { detachSpanProcessor, resolveTracing } from "./provider.js";
 import type { TracingMode } from "./provider.js";
 import { errorAttrs } from "./errors-util.js";
 import { resolveCaptureContent, resolveCaptureSecrets } from "./redact.js";
+import { resolveExportGzip } from "./exporter.js";
 import { setCaptureSecrets } from "../utils/headers.js";
 import {
   agentAttributes,
@@ -50,7 +51,7 @@ function definedIdentity(options: Identity): Identity {
   return out;
 }
 
-const SDK_VERSION = "0.3.2";
+const SDK_VERSION = "0.3.3";
 
 const IO_MAX = 4096;
 
@@ -112,6 +113,7 @@ export class EvalKitClient {
       ...opts,
       captureContent: resolveCaptureContent(opts.captureContent),
       captureSecrets: resolveCaptureSecrets(opts.captureSecrets),
+      exportGzip: resolveExportGzip(opts.exportGzip),
     };
 
     setCaptureSecrets(this.options.captureSecrets);
@@ -126,6 +128,7 @@ export class EvalKitClient {
         scheduledDelayMillis: this.options.scheduledDelayMillis,
         captureContent: this.options.captureContent,
         captureSecrets: this.options.captureSecrets,
+        exportGzip: this.options.exportGzip,
         mask: this.options.mask,
       },
       this.options.tracerProvider
@@ -198,7 +201,7 @@ export class EvalKitClient {
     attributes?: Record<string, string>
   ): {
     traceId: string;
-    end: (status?: "OK" | "ERROR", response?: { statusCode?: number; body?: unknown; headers?: Record<string, string> }) => void;
+    end: (status?: "OK" | "ERROR", response?: { statusCode?: number; body?: unknown; headers?: Record<string, string>; route?: string }) => void;
     ctx: OtelContext;
   } {
     const span = this.tracer.startSpan(
@@ -224,7 +227,13 @@ export class EvalKitClient {
     return {
       traceId,
       ctx,
-      end: (status: "OK" | "ERROR" = "OK", response?: { statusCode?: number; body?: unknown; headers?: Record<string, string> }) => {
+      end: (status: "OK" | "ERROR" = "OK", response?: { statusCode?: number; body?: unknown; headers?: Record<string, string>; route?: string }) => {
+        // The route template (`/orders/:id`) names the span once the framework has matched it; the
+        // raw path would make every id an operation of its own.
+        if (response?.route) {
+          span.updateName(`${httpCtx.method} ${response.route}`);
+          span.setAttribute("http.route", response.route);
+        }
         if (response?.statusCode !== undefined) span.setAttribute("http.status_code", response.statusCode);
         if (response?.body !== undefined) span.setAttribute("http.response.body", JSON.stringify(response.body));
         if (response?.headers) span.setAttribute("http.response.headers", JSON.stringify(response.headers));

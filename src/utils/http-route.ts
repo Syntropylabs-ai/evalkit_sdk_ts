@@ -1,0 +1,46 @@
+/**
+ * The route template of an incoming request (`/orders/:id`), which names its server span: the raw
+ * path puts every id in the name, so each order or charge became an operation of its own.
+ */
+
+const SERVER_ROUTE = Symbol.for('evalkit.http.route');
+
+/**
+ * Record the route a framework matched on the Node request it is serving, for the server span the
+ * http instrumentation opened before the framework saw the request. Fastify and NestJS on Fastify
+ * keep their route on their own request object, so their adapters pass `request.raw` here.
+ */
+export function setServerRoute(req: unknown, route: unknown): void {
+  if (!req || typeof req !== 'object' || typeof route !== 'string' || !route.startsWith('/')) return;
+  try {
+    (req as Record<symbol, unknown>)[SERVER_ROUTE] = route;
+  } catch {
+
+  }
+}
+
+/**
+ * The template of the route that served `req`, or undefined when no framework matched one (a 404,
+ * or a bare http server). Express (and NestJS on Express) leaves the matched route on the request:
+ * `req.route.path` relative to the router, mounted at `req.baseUrl`.
+ */
+export function serverRoute(req: unknown): string | undefined {
+  if (!req || typeof req !== 'object') return undefined;
+  try {
+    const recorded = (req as Record<symbol, unknown>)[SERVER_ROUTE];
+    if (typeof recorded === 'string') return recorded;
+    const r = req as { route?: { path?: unknown }; baseUrl?: unknown };
+    const path = r.route?.path;
+    if (typeof path !== 'string' || !path.startsWith('/')) return undefined;
+    const base = typeof r.baseUrl === 'string' ? r.baseUrl.replace(/\/$/, '') : '';
+    const joined = path === '/' && base ? base : `${base}${path}`;
+    return joined || '/';
+  } catch {
+    return undefined;
+  }
+}
+
+/** An outbound HTTP span's name: the method alone, as OpenTelemetry names a client span whose URL template is unknown. The URL stays in `http.url`. */
+export function clientSpanName(method: string | undefined): string {
+  return (method || 'GET').toUpperCase();
+}
