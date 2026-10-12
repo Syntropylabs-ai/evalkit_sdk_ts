@@ -13,7 +13,8 @@ const MiB = 1024 * 1024;
 const MAX_REQUEST_BYTES = 4 * MiB;
 const BODY_OVERHEAD = '{"events":[]}'.length;
 
-// A stand-in for /v1/ingest that records every request and answers with `respond(request)`.
+// A stand-in for /v1/ingest that records every request and answers with `respond(request)`: a status, or
+// [status, Retry-After].
 const requests = [];
 let respond = () => 202;
 const server = http.createServer((req, res) => {
@@ -28,9 +29,14 @@ const server = http.createServer((req, res) => {
       request.jsonBytes = body.length;
       request.events = JSON.parse(body.toString('utf8')).events;
     } catch {}
-    request.status = respond(request);
+    const answer = respond(request);
+    const [status, retryAfter] = Array.isArray(answer) ? answer : [answer];
+    request.status = status;
+    request.at = Date.now();
     requests.push(request);
-    res.writeHead(request.status, { 'Content-Type': 'application/json' });
+    const headers = { 'Content-Type': 'application/json' };
+    if (retryAfter !== undefined) headers['Retry-After'] = retryAfter;
+    res.writeHead(request.status, headers);
     res.end(JSON.stringify(request.status < 300 ? { accepted: request.events?.length ?? 0, status: 'queued' } : { error: 'refused' }));
   });
 });
@@ -248,6 +254,44 @@ try {
     );
     assert.ok(requests.every((r) => r.events.length === 1 && r.events[0].operation === 'down-0'));
     assert.ok(errors.some((e) => e.includes('export failed 503')), 'the failure is reported');
+    await client.destroy();
+  }
+
+  {
+    const answers = [[429, '0'], 202];
+    reset(() => answers.shift() ?? 202);
+    const client = newClient();
+    assert.ok(await exportSpans(client, [{ name: 'throttled' }]));
+    assert.deepStrictEqual(requests.map((r) => r.status), [429, 202], 'a 429 is retried with the same body');
+    assert.deepStrictEqual(accepted(), ['throttled']);
+    await client.destroy();
+  }
+
+  {
+    const answers = [[503, '1'], 202];
+    reset(() => answers.shift() ?? 202);
+    const client = newClient();
+    assert.ok(await exportSpans(client, [{ name: 'later' }]));
+    const gap = requests[1].at - requests[0].at;
+    assert.ok(gap >= 950, `the retry came ${gap} ms after a Retry-After of 1 s`);
+    await client.destroy();
+  }
+
+  {
+    reset(() => 429);
+    const client = newClient();
+    assert.strictEqual(await exportSpans(client, spansNamed(2, 'busy', 3 * MiB)), false);
+    assert.strictEqual(requests.length, 4, 'a 429 that never clears is tried 4 times, and the next request is not sent');
+    assert.ok(requests.every((r) => r.events[0].operation === 'busy-0'));
+    assert.ok(errors.some((e) => e.includes('export failed 429')), 'the failure is reported');
+    await client.destroy();
+  }
+
+  {
+    reset(() => 404);
+    const client = newClient();
+    assert.strictEqual(await exportSpans(client, [{ name: 'nowhere' }]), false);
+    assert.strictEqual(requests.length, 1, 'a 4xx other than 429 is not retried');
     await client.destroy();
   }
 

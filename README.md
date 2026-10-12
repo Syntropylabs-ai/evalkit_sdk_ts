@@ -498,14 +498,16 @@ await Eval({ name: "support-golden", data: rows, evaluators: [RULE_ID], hyperpar
 
 ## Scenario simulation
 
-Generate synthetic-user scenarios from your agent's prompt and tools, replay each one against your real agent, then grade the run with LLM-as-judge evaluators.
+Generate simulated-user scenarios from your agent's prompt and tools, play each one against your real agent in your own process, then grade the run with LLM-as-judge evaluators. The server routes need a plan with simulations.
+
+> The live simulated user (`userModel`, `liveUser`, the `transcript`, `endedBy` and `simulatedUserUsage` results) and the scenario briefs that `generateScenarios()` writes by default are in the next release after 0.3.3 (see `CHANGELOG.md`, Unreleased). With 0.3.3, `simulateUser()` replays scripted turns only and `generateScenarios()` writes every turn out.
 
 ```ts
 import evalkit from "syntropylabs-evalkit";
 
 evalkit.init({ subscriptionKey: process.env.EVALKIT_SUBSCRIPTION_KEY!, serviceName: "support-bot" });
 
-// 1. Generate scenarios (bring your own key for the generation call)
+// 1. Generate scenarios (pass provider, apiKey and model to use your own key; else the server's default model)
 const scenarios = await evalkit.generateScenarios({
   agentInstructions: SYSTEM_PROMPT,
   tools: ["search_kb", "lookup_order", "create_ticket"],
@@ -514,15 +516,18 @@ const scenarios = await evalkit.generateScenarios({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
-// 2. Replay each scenario against your real agent
+// 2. Play each scenario against your real agent, one turn per entrypoint call
 const { simulationId, runId, results } = await evalkit.simulateUser({
   scenarios,
   entrypoint: async (ctx) => {
     const { text, toolCalls } = await runAgent(ctx.sessionId, ctx.message);
-    return { text, toolCalls };
+    return { text, toolCalls }; // [{ name, args, result }], or error for a failed call
   },
+  userModel: "sim-user", // a model configuration of your organization, by name or id
+  maxTurns: 10,
   tags: ["ci"],
 });
+for (const r of results) console.log(r.name, r.status, r.endedBy, r.simulatedUserUsage);
 
 // 3. Grade the run against an evaluator collection (LLM-as-judge, BYOK)
 const result = await evalkit.evaluateSimulation({
@@ -542,6 +547,42 @@ for (const scn of result.scenarios) {
 ```
 
 `evaluateSimulation` returns scores per scenario and per criterion, with reasons. They also appear in the dashboard.
+
+### Scenarios
+
+`generateScenarios()` also takes `functionSchemas`, `context`, `rag`, `categories`, `model`, `temperature`, `reasoningEffort`, `maxCompletionTokens`, `maxTokens`, `apiUrl` and `scriptedTurns`, and `count` defaults to 5. By default each scenario is a brief for the live simulated user: its `persona`, `user_goal` (what the user wants and what would satisfy them), `hidden_info` (facts the user knows but shares only once the agent asks about them, as `{ key: { value, reveal_trigger } }`), `success_criteria` (what a correct agent does) and its opening message in `starting_prompt`, with no later turns. `scriptedTurns: true` writes every user turn out in `turns` instead, for replaying a conversation verbatim. Scenario fields keep their snake_case names.
+
+### Playing a scenario
+
+The entrypoint receives a `SimContext` with `message`, `sessionId`, `state` and `turn`, and returns a string or an `AgentTurnResult` (`text`, `toolCalls`, `retrievedContext`). Each user turn comes, in order, from the scenario's scripted turns (`turns`, else `messages`, else `starting_prompt`), then from a `turn_events` entry scheduled for that turn (`{ at_user_turn, message }`), then, for a live scenario, from the simulated user.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `maxTurns` | `12` | The most user turns one scenario plays. The live user plays at most 50, whatever this says. |
+| `userModel` | `model` | The model configuration the simulated user runs on, by its name or id in your organization. A live scenario without one fails with the platform's "No model is configured for the simulated user". |
+| `liveUser` | `undefined` | `undefined` plays the live user for a scenario that has a `user_goal` or `conversation_plan` and no `turns`, so a turns-only scenario replays as written. `true` plays it after the scripted turns of any scenario; `false` never. |
+| `metrics` | all | Which deterministic metrics score each scenario locally. |
+| `tags` | none | Labels for the run. |
+| `safeMode` | `true` | Copied into `ctx.state.__safe_mode__`, for your agent to guard side effects. |
+| `apiUrl` | `EVALKIT_API_URL`, then the client's | Where the user-turn requests go. |
+
+### The live simulated user
+
+Each live turn is one `POST /simulations/user-turn` with the scenario's brief (persona, `user_goal` or else `conversation_plan`, `hidden_info`, `tool_fixtures`, `min_user_turns`), the conversation so far and the turn number. The platform plays the user on your model configuration and answers with the next message, or that the user is done because its goal was met or it gave up. The values in the tool fixtures' inputs, such as an order id, are details the user can hand over when the agent asks. `AgentTurnResult.toolCalls` go with the agent's reply, each with `name`, `args` and `result` or `error`, each field cut to 2,000 characters. They let the user tell whether what the agent says actually happened, such as a refund its tool refused, without ever quoting them.
+
+Each user turn is recorded as its own `simulated_user` span inside the scenario's trace, with `evalkit.simulation.role: user`, the turn number, whether the user was done, the tokens and the cost. Evaluations never read it as the agent's turn, tool call or output.
+
+A live scenario's result carries three more fields:
+
+- `transcript`: the conversation, as `{ role, content }` messages.
+- `endedBy`: `"user"` (the user was done), `"max_turns"` or `"error"`.
+- `simulatedUserUsage`: `calls`, `inputTokens`, `outputTokens` and `costUsd`, which is `null` when the model has no price.
+
+When the platform cannot play a turn (no model, a refused key, an answer it cannot read, a limit), the scenario ends with status `"ERROR"` and the platform's reason in `error`.
+
+Limits: at most 50 user turns per scenario; 120 user-turn requests a minute per environment; 5,000 simulated user turns per organization per UTC day, after which the platform answers `429` until midnight UTC. The simulated user runs on your own model configuration, so its calls are billed to your provider account, and the platform records their tokens and cost per environment; the Cost page shows that spend as Simulated user.
+
+Each scenario is its own trace, with a root span named `scenario:<name>`, and is scored locally against its `expected_tools`, `constraints` and `target_keywords`. `simulateUser()` resolves to `{ simulationId, runId, results }`, one result per scenario with `scenarioId`, `name`, `status`, `turns`, `scores` and, on failure, `error`.
 
 ## Coding agents
 
@@ -750,7 +791,7 @@ With the scrubber off, credential headers are recorded exactly as they were sent
 
 The exported `EvalKitOptions` type has the full set, including `appVersion`, `deviceId`, `debug` and the batch settings.
 
-`EVALKIT_API_URL` overrides the control-plane base URL for `Eval()`, feedback and prompts. `EVALKIT_QUIET=1` silences the evaluation-run link, `EVALKIT_CAPTURE_SECRETS=1` turns off secret masking, and `EVALKIT_EXPORT_GZIP=false` sends export requests uncompressed. The `exportGzip` option wins over the variable.
+`EVALKIT_API_URL` overrides the control-plane base URL for `Eval()`, feedback, prompts, `generateScenarios()`, the live simulated user of `simulateUser()` and `evaluateSimulation()`. `EVALKIT_QUIET=1` silences the evaluation-run link, `EVALKIT_CAPTURE_SECRETS=1` turns off secret masking, and `EVALKIT_EXPORT_GZIP=false` sends export requests uncompressed. The `exportGzip` option wins over the variable.
 
 ## Coexisting with an OpenTelemetry setup you already have
 

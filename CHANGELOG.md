@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.4 — 2026-10-12
+
+### Added
+- `simulateUser()` plays a live simulated user. After a scenario's scripted turns, or when it has
+  none, the platform plays the user from the scenario's persona, `user_goal`, `hidden_info` and
+  tool fixtures, and the user stops once its goal is met or `maxTurns` user turns were played (at
+  most 50). New options: `userModel` (the model configuration the user runs on, by name or id;
+  falls back to `model`) and `liveUser` (on by default for a scenario with a `user_goal` or
+  `conversation_plan` and no `turns`). `AgentTurnResult.toolCalls` take `result` and `error`,
+  which reach the user as what the agent was told. Each user turn is its own span marked
+  `evalkit.simulation.role: user`. Live results carry `transcript`, `endedBy` and
+  `simulatedUserUsage`. Needs the platform's `POST /simulations/user-turn` (paid plans with
+  simulations).
+- `generateScenarios()` writes scenarios for the live user by default; pass `scriptedTurns: true`
+  for every turn written out.
+
+### Changed
+- A 429 from the receiver is retried like a 5xx instead of dropping the spans. On a 429 or 503,
+  `Retry-After` (seconds or an HTTP-date) sets the wait, capped at 10 s; without it the backoff
+  steps (200 ms, 600 ms, 1.8 s) are jittered so clients refused together do not retry together.
+  One export spends at most 20 s waiting across all its requests, inside the BatchSpanProcessor's
+  30 s export timeout. A 429 that outlasts the retries stops the rest of that export, as a 5xx
+  does. Every other 4xx is still final.
+
 ## 0.3.3 — 2026-10-11
 
 ### Added

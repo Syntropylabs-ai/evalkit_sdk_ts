@@ -51,7 +51,7 @@ function definedIdentity(options: Identity): Identity {
   return out;
 }
 
-const SDK_VERSION = "0.3.3";
+const SDK_VERSION = "0.3.4";
 
 const IO_MAX = 4096;
 

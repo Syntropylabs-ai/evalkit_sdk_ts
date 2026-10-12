@@ -10,6 +10,7 @@ import { frameworkSpanFields } from "./framework-spans.js";
 import { applyMask, envFlag, stripContent } from "./redact.js";
 import { scrubSecrets } from "./secrets.js";
 import type { MaskHook } from "./redact.js";
+import { RETRY_BUDGET_MS, isRetryableStatus, retryDelayMs } from "./retry.js";
 
 const AUTH_FAIL_LIMIT = 3;
 
@@ -47,7 +48,7 @@ interface EncodedSpan {
 }
 
 // "refused": the receiver refused this request's spans, and the next request may still be accepted.
-// "halt": no answer, only 5xx ones, or a refused key, so every later request would meet the same failure.
+// "halt": no answer, only 5xx or 429 ones, or a refused key, so every later request would meet the same failure.
 type Outcome = "sent" | "refused" | "halt";
 
 const CACHE_READ_KEYS = [
@@ -121,6 +122,8 @@ export class EvalKitExporter implements SpanExporter {
   private gzip: boolean;
   private authFailures = 0;
   private disabled = false;
+  private clock: () => number = Date.now;
+  private pause: (ms: number) => Promise<void> = sleep;
 
   constructor(opts: {
     baseUrl: string;
@@ -185,7 +188,7 @@ export class EvalKitExporter implements SpanExporter {
       console.log(`[evalkit] sending ${encoded.length} span(s) → ${this.url}`);
     }
 
-    this.sendAll(encoded).then(
+    this.sendAll(encoded, this.clock() + RETRY_BUDGET_MS).then(
       (ok) => resultCallback({ code: ok ? ExportResultCode.SUCCESS : ExportResultCode.FAILED }),
       (err) => {
         console.error("[evalkit] export error:", err);
@@ -194,11 +197,11 @@ export class EvalKitExporter implements SpanExporter {
     );
   }
 
-  private async sendAll(spans: EncodedSpan[]): Promise<boolean> {
+  private async sendAll(spans: EncodedSpan[], deadline: number): Promise<boolean> {
     let ok = true;
     for (const group of groupForRequests(spans, MAX_REQUEST_BYTES, this.maxRequestSpans)) {
       if (this.disabled) return false;
-      const outcome = await this.send(group);
+      const outcome = await this.send(group, deadline);
       if (outcome === "sent") continue;
       ok = false;
       if (outcome === "halt") break;
@@ -206,8 +209,8 @@ export class EvalKitExporter implements SpanExporter {
     return ok;
   }
 
-  private async send(spans: EncodedSpan[]): Promise<Outcome> {
-    const res = await this.deliver(requestBody(spans));
+  private async send(spans: EncodedSpan[], deadline: number): Promise<Outcome> {
+    const res = await this.deliver(requestBody(spans), deadline);
     if (!res) return "halt";
     if (res.ok) {
       this.authFailures = 0;
@@ -221,7 +224,7 @@ export class EvalKitExporter implements SpanExporter {
       return "sent";
     }
     const text = await res.text().catch(() => "(no body)");
-    if (res.status >= 500) {
+    if (isRetryableStatus(res.status)) {
       console.error(`[evalkit] export failed ${res.status}: ${text}`);
       return "halt";
     }
@@ -234,9 +237,9 @@ export class EvalKitExporter implements SpanExporter {
     if (res.status === 413) {
       if (spans.length > 1) {
         const half = Math.floor(spans.length / 2);
-        const first = await this.send(spans.slice(0, half));
+        const first = await this.send(spans.slice(0, half), deadline);
         if (first === "halt") return first;
-        const second = await this.send(spans.slice(half));
+        const second = await this.send(spans.slice(half), deadline);
         return second === "sent" ? first : second;
       }
       console.warn(
@@ -249,15 +252,15 @@ export class EvalKitExporter implements SpanExporter {
     return "refused";
   }
 
-  private async deliver(body: Buffer): Promise<Response | undefined> {
-    if (!this.gzip) return this.post(body, false);
-    const compressed = await this.post(await gzipAsync(body, { level: GZIP_LEVEL }), true);
+  private async deliver(body: Buffer, deadline: number): Promise<Response | undefined> {
+    if (!this.gzip) return this.post(body, false, deadline);
+    const compressed = await this.post(await gzipAsync(body, { level: GZIP_LEVEL }), true, deadline);
     if (!compressed || (compressed.status !== 400 && compressed.status !== 415)) return compressed;
     // A receiver that predates compressed ingest answers 415, or 400 when it parses the gzip bytes as JSON.
     // The same body sent uncompressed tells that 400 from one about the spans themselves, which the receiver
     // refuses again.
     await discardBody(compressed);
-    const plain = await this.post(body, false);
+    const plain = await this.post(body, false, deadline);
     if (compressed.status === 415 || plain?.status !== 400) this.stopCompressing(compressed.status);
     return plain;
   }
@@ -271,7 +274,7 @@ export class EvalKitExporter implements SpanExporter {
     );
   }
 
-  private async post(body: Uint8Array, compressed: boolean): Promise<Response | undefined> {
+  private async post(body: Uint8Array, compressed: boolean, deadline: number): Promise<Response | undefined> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "X-Subscription-Key": this.subscriptionKey,
@@ -279,7 +282,7 @@ export class EvalKitExporter implements SpanExporter {
     if (compressed) headers["Content-Encoding"] = "gzip";
     try {
       // Buffer.from and zlib return Buffers over a plain ArrayBuffer, the kind fetch's body type asks for.
-      return await this.fetchWithRetry(this.url, { method: "POST", headers, body: body as BodyInit });
+      return await this.fetchWithRetry(this.url, { method: "POST", headers, body: body as BodyInit }, deadline);
     } catch (err) {
       console.error("[evalkit] export network error:", err);
       return undefined;
@@ -299,27 +302,30 @@ export class EvalKitExporter implements SpanExporter {
     }
   }
 
-  private async fetchWithRetry(url: string, init: RequestInit, maxRetries = 3): Promise<Response> {
-    const delays = [200, 600, 1800];
+  // Retries what the receiver could not take now (no answer, 429, 5xx) while the export's budget lasts. A
+  // Retry-After on 429 or 503 sets the wait; without one the backoff is jittered.
+  private async fetchWithRetry(url: string, init: RequestInit, deadline: number, maxRetries = 3): Promise<Response> {
     let lastErr: unknown;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      let wait: number;
       try {
         const res = await fetch(url, init);
 
-        if (res.ok || (res.status >= 400 && res.status < 500)) return res;
-        if (attempt < maxRetries) {
-          if (this.debug) console.warn(`[evalkit] HTTP ${res.status}, retry ${attempt + 1}/${maxRetries}`);
-          await sleep(delays[attempt] ?? 1800);
-        } else {
-          return res;
-        }
+        if (!isRetryableStatus(res.status) || attempt === maxRetries) return res;
+        const retryAfter = res.status === 429 || res.status === 503 ? res.headers.get("retry-after") : null;
+        wait = retryDelayMs(attempt, retryAfter, this.clock());
+        if (this.clock() + wait > deadline) return res;
+        // An unread body holds its connection for as long as the wait lasts.
+        await discardBody(res);
+        if (this.debug) console.warn(`[evalkit] HTTP ${res.status}, retry ${attempt + 1}/${maxRetries} in ${wait} ms`);
       } catch (err) {
         lastErr = err;
-        if (attempt < maxRetries) {
-          if (this.debug) console.warn(`[evalkit] network error, retry ${attempt + 1}/${maxRetries}:`, err);
-          await sleep(delays[attempt] ?? 1800);
-        }
+        if (attempt === maxRetries) break;
+        wait = retryDelayMs(attempt, undefined, this.clock());
+        if (this.clock() + wait > deadline) break;
+        if (this.debug) console.warn(`[evalkit] network error, retry ${attempt + 1}/${maxRetries}:`, err);
       }
+      await this.pause(wait);
     }
     throw lastErr;
   }

@@ -74,7 +74,7 @@ export { Prompt, withPrompt, currentPrompt, compileTemplate, variablesOf } from 
 export type { PromptPayload, PromptTemplate, PromptMessage, PromptVariables, GetPromptOptions } from "./prompts.js";
 export type { PromptRef } from "./core/prompt-context.js";
 
-export type { SimContext, AgentTurnResult, GenerateScenariosOptions, SimulateUserOptions, EvaluateSimulationOptions, EvaluateSimulationResult, SimEvalMetric, SimEvalScenario } from "./simulate.js";
+export type { SimContext, AgentTurnResult, GenerateScenariosOptions, SimulateUserOptions, ScenarioRunResult, EvaluateSimulationOptions, EvaluateSimulationResult, SimEvalMetric, SimEvalScenario } from "./simulate.js";
 
 let _instance: EvalKitClient | null = null;
 

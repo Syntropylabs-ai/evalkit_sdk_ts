@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import type { EvalKitClient } from "./core/client.js";
 import { simByTraceId, simToolCallsByTraceId } from "./core/simulation.js";
 import { evaluate } from "./evaluate.js";
+import { Conversation, wantsLiveUser, type EndedBy, type SimulatedUserUsageTotals } from "./live-user.js";
 
 export interface SimContext {
   message: string;
@@ -13,7 +14,12 @@ export interface SimContext {
 
 export interface AgentTurnResult {
   text: string;
-  toolCalls?: { name: string; args?: Record<string, unknown> }[];
+  /**
+   * The tool calls behind this reply. `result` and `error` are passed to a live
+   * simulated user as what the agent was told, so it can react to what the
+   * agent actually did.
+   */
+  toolCalls?: { name: string; args?: Record<string, unknown>; result?: unknown; error?: string }[];
   retrievedContext?: string[];
 }
 
@@ -35,6 +41,13 @@ export interface GenerateScenariosOptions {
   maxCompletionTokens?: number;
   maxTokens?: number;
   apiUrl?: string;
+  /**
+   * false (the default): each scenario carries what a live simulated user plays
+   * from (persona, user_goal, hidden_info, success_criteria, the opening message)
+   * and no later turns. true: every user turn is written out, for replaying a
+   * conversation verbatim.
+   */
+  scriptedTurns?: boolean;
 }
 
 export interface SimulateUserOptions {
@@ -44,9 +57,32 @@ export interface SimulateUserOptions {
   maxTurns?: number;
   tags?: string[];
   safeMode?: boolean;
+  /** Used for the simulated user when userModel is not given. */
   model?: string;
   provider?: string;
   apiKey?: string;
+  /** The model configuration the simulated user runs on: its name or id in your organization. */
+  userModel?: string;
+  /**
+   * Whether a simulated user plays the turns after the scripted ones. Defaults to
+   * true for a scenario with a user_goal or conversation_plan and no turns; a
+   * turns-only scenario replays its turns as written.
+   */
+  liveUser?: boolean;
+  apiUrl?: string;
+}
+
+export interface ScenarioRunResult {
+  scenarioId: string;
+  name: string;
+  status: "OK" | "ERROR";
+  turns: number;
+  scores: Record<string, number>;
+  error?: string;
+  /** Live scenarios only: the conversation as it was played. */
+  transcript?: { role: "user" | "assistant"; content: string }[];
+  endedBy?: EndedBy;
+  simulatedUserUsage?: SimulatedUserUsageTotals;
 }
 
 export interface EvaluateSimulationOptions {
@@ -125,6 +161,7 @@ export async function generateScenarios(
   const body: Record<string, unknown> = {
     agentInstructions: opts.agentInstructions,
     count: opts.count ?? 5,
+    scriptedTurns: opts.scriptedTurns ?? false,
   };
   if (opts.tools) body.tools = opts.tools.map(jsonableTool);
   if (opts.functionSchemas) body.functionSchemas = opts.functionSchemas.map(jsonableTool);
@@ -153,17 +190,6 @@ export async function generateScenarios(
   }
   const data = (await res.json()) as { scenarios?: any[] };
   return data.scenarios ?? [];
-}
-
-function userTurns(scenario: any): string[] {
-  const raw = scenario.turns ?? scenario.messages ?? [];
-  const msgs: string[] = [];
-  for (const t of raw) {
-    if (typeof t === "string") msgs.push(t);
-    else if (t && typeof t === "object" && t.content && (t.role ?? "user") === "user") msgs.push(String(t.content));
-  }
-  if (msgs.length === 0 && scenario.starting_prompt) msgs.push(String(scenario.starting_prompt));
-  return msgs;
 }
 
 function scoreScenario(
@@ -197,11 +223,18 @@ async function runScenario(
   opts: SimulateUserOptions,
   scenario: any,
   cfg: { simulationId: string; runId: string; maxTurns: number },
-): Promise<{ result: any; traceId: string }> {
+): Promise<{ result: ScenarioRunResult; traceId: string }> {
   const name = scenario.name ?? "scenario";
   const scenarioId = scenario.scenario_id ?? "scn_" + randHex(6);
   const sessionId = "sess_" + randHex(6);
-  const turns = userTurns(scenario).slice(0, cfg.maxTurns);
+  const conversation = new Conversation(
+    client,
+    scenario,
+    wantsLiveUser(scenario, opts.liveUser),
+    cfg.maxTurns,
+    (opts.userModel ?? opts.model)?.trim() || undefined,
+    opts.apiUrl,
+  );
   const state: Record<string, unknown> = { ...(scenario.setup?.state ?? {}), __safe_mode__: opts.safeMode ?? true };
 
   const { traceId, end, ctx } = client.startTrace(`scenario:${name}`, { "evalkit.session_id": sessionId });
@@ -211,21 +244,25 @@ async function runScenario(
   let error: string | undefined;
   const texts: string[] = [];
   const explicitTools: { name: string; args?: Record<string, unknown> }[] = [];
-  let count = 0;
   let scores: Record<string, number> = {};
 
   try {
     await otelContext.with(ctx, async () => {
-      for (let i = 0; i < turns.length; i++) {
-        const simCtx: SimContext = { message: turns[i], sessionId, state, turn: i + 1 };
+      let message = conversation.opening();
+      while (message !== undefined) {
+        conversation.beginTurn(message);
+        const simCtx: SimContext = { message, sessionId, state, turn: conversation.turns };
         const result = await opts.entrypoint(simCtx);
+        let text: string;
         if (result && typeof result === "object" && "text" in result) {
-          texts.push(result.text);
+          text = result.text;
           if (result.toolCalls) explicitTools.push(...result.toolCalls);
         } else {
-          texts.push(String(result));
+          text = String(result);
         }
-        count++;
+        texts.push(text);
+        conversation.endTurn(text, result);
+        message = await conversation.nextMessage();
       }
 
       const toolCalls = explicitTools.length ? explicitTools : (simToolCallsByTraceId.get(traceId) ?? []);
@@ -238,19 +275,24 @@ async function runScenario(
     end(status);
   }
 
-  const result: any = { scenarioId, name, status, turns: count, scores };
+  const result: ScenarioRunResult = { scenarioId, name, status, turns: conversation.turns, scores };
   if (error) result.error = error;
+  if (conversation.live) {
+    result.transcript = conversation.history.map((m) => ({ role: m.role, content: m.content }));
+    result.endedBy = conversation.endedBy ?? "error";
+    result.simulatedUserUsage = conversation.usage();
+  }
   return { result, traceId };
 }
 
 export async function simulateUser(
   client: EvalKitClient,
   opts: SimulateUserOptions,
-): Promise<{ simulationId: string; runId: string; results: any[] }> {
+): Promise<{ simulationId: string; runId: string; results: ScenarioRunResult[] }> {
   const simulationId = "sim_" + randHex(8);
   const runId = "run_" + randHex(8);
   const maxTurns = opts.maxTurns ?? 12;
-  const results: any[] = [];
+  const results: ScenarioRunResult[] = [];
   const traceIds: string[] = [];
 
   for (const scenario of opts.scenarios) {
