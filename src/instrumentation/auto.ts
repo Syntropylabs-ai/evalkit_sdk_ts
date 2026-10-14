@@ -1,6 +1,8 @@
 import type { EvalKitClient } from '../core/client.js';
 import { dynImport, loadIfAlreadyRequired, getRequire } from '../utils/dynimport.js';
+import type { TracerProvider } from '@opentelemetry/api';
 import { patchOpenAI } from './llm/openai/index.js';
+import { patchOpenAIResponses } from './llm/openai/responses.js';
 import { patchAnthropic } from './llm/anthropic/index.js';
 import { patchBedrock, patchBedrockAgentRuntime } from './llm/bedrock/index.js';
 import { patchAnthropicVertex, patchVertexGenerativeModel } from './llm/vertex-ai/index.js';
@@ -18,6 +20,7 @@ import { patchHttp, patchFetch, patchIncomingHttp } from './http/node-http.js';
 import { patchMcp } from './mcp.js';
 import { patchGoogleAdk } from './google-adk.js';
 import { patchLangChain } from './llm/langchain/index.js';
+import { patchLangGraphModule } from './llm/langchain/langgraph.js';
 import { patchConsole } from './runtime/console.js';
 import { patchErrors } from './runtime/errors.js';
 import { patchOllama } from './llm/ollama.js';
@@ -91,19 +94,23 @@ async function tryPatchIoredisAsync(client: EvalKitClient): Promise<void> {
   } catch {}
 }
 
+// openai's chat completions, and its Responses API where the installed version has one.
+function patchOpenAIModule(client: EvalKitClient, openaiMod: any): boolean {
+  const OpenAI = openaiMod?.default ?? openaiMod?.OpenAI ?? openaiMod;
+  const proto = OpenAI?.Chat?.Completions?.prototype;
+  if (!proto) return false;
+  patchOpenAI(client, proto);
+  const responses = OpenAI?.Responses?.prototype;
+  if (responses) patchOpenAIResponses(client, responses);
+  return true;
+}
+
 async function tryPatchOpenAIAsync(client: EvalKitClient): Promise<void> {
   try {
-    const _req = getRequire();
-    const openaiMod = _req('openai');
-    const OpenAI = openaiMod.default ?? openaiMod.OpenAI ?? openaiMod;
-    const proto = OpenAI?.Chat?.Completions?.prototype;
-    if (proto) { patchOpenAI(client, proto); return; }
+    if (patchOpenAIModule(client, getRequire()('openai'))) return;
   } catch {}
   try {
-    const openaiMod = await dynImport('openai');
-    const OpenAI = openaiMod.default ?? openaiMod.OpenAI ?? openaiMod;
-    const proto = OpenAI?.Chat?.Completions?.prototype;
-    if (proto) patchOpenAI(client, proto);
+    patchOpenAIModule(client, await dynImport('openai'));
   } catch {}
 }
 
@@ -187,19 +194,22 @@ async function tryPatchVertexAIAsync(client: EvalKitClient): Promise<void> {
   } catch {}
 }
 
+// CohereClient (the v1 chat API) and CohereClientV2, where the installed version has it.
+function patchCohereModule(client: EvalKitClient, mod: any): boolean {
+  const CohereClient = mod?.CohereClient ?? mod?.default?.CohereClient ?? mod?.default;
+  if (!CohereClient?.prototype) return false;
+  patchCohere(client, CohereClient.prototype);
+  const V2 = mod?.CohereClientV2 ?? mod?.default?.CohereClientV2;
+  if (V2?.prototype) patchCohere(client, V2.prototype);
+  return true;
+}
+
 async function tryPatchCohereAsync(client: EvalKitClient): Promise<void> {
   try {
-    const _req = getRequire();
-    const mod = _req('cohere-ai');
-    const CohereClient = mod.CohereClient ?? mod.default?.CohereClient ?? mod.default;
-    const proto = CohereClient?.prototype;
-    if (proto) { patchCohere(client, proto); return; }
+    if (patchCohereModule(client, getRequire()('cohere-ai'))) return;
   } catch {}
   try {
-    const mod = await dynImport('cohere-ai');
-    const CohereClient = mod.CohereClient ?? mod.default?.CohereClient ?? mod.default;
-    const proto = CohereClient?.prototype;
-    if (proto) patchCohere(client, proto);
+    patchCohereModule(client, await dynImport('cohere-ai'));
   } catch {}
 }
 
@@ -255,6 +265,12 @@ async function tryPatchLangChainAsync(client: EvalKitClient): Promise<void> {
   try {
     await patchLangChain(client);
   } catch {}
+  try {
+    if (patchLangGraphModule(client, getRequire()('@langchain/langgraph/pregel'))) return;
+  } catch {}
+  try {
+    patchLangGraphModule(client, await dynImport('@langchain/langgraph/pregel'));
+  } catch {}
 }
 
 async function tryPatchGoogleLiveAsync(client: EvalKitClient): Promise<void> {
@@ -296,16 +312,43 @@ const OTEL_INSTRUMENTATIONS: Array<[string, string]> = [
   ['@opentelemetry/instrumentation-pg', 'PgInstrumentation'],
   ['@opentelemetry/instrumentation-mysql2', 'MySQL2Instrumentation'],
   ['@opentelemetry/instrumentation-graphql', 'GraphQLInstrumentation'],
-  ['@opentelemetry/instrumentation-nestjs-core', 'NestInstrumentation'],
 ];
 
-const OTEL_DISABLED_NATIVE = {
-  '@opentelemetry/instrumentation-fs': { enabled: false },
-  '@opentelemetry/instrumentation-undici': { enabled: false },
-  '@opentelemetry/instrumentation-http': { enabled: false },
-};
+// OpenTelemetry instrumentations left off. They hook require(), so they ran only in CommonJS apps, and each
+// records what the SDK records itself or what is noise beside it: a request's server and client spans
+// (http, undici), a model call (openai), the web framework's middleware and route handlers (express, router,
+// connect, koa, hapi, restify, nestjs-core) and each socket and lookup (net, dns, fs). With them off a
+// CommonJS app gives the same spans as the same app as an ES module.
+const OTEL_DISABLED_NATIVE = Object.fromEntries([
+  'fs', 'undici', 'http', 'net', 'dns', 'openai',
+  'express', 'router', 'connect', 'koa', 'hapi', 'restify', 'nestjs-core',
+].map((name) => [`@opentelemetry/instrumentation-${name}`, { enabled: false }]));
+
+// The OpenTelemetry instrumentations the SDK registered, and the provider they report to. A second set
+// would wrap every library the first set wrapped and record each call twice, so a later init() only points
+// the first set at its provider when that changed.
+let registered: { instrumentations: unknown[]; provider: TracerProvider } | undefined;
+let registering: Promise<void> | undefined;
 
 async function tryRegisterOtelInstrumentations(client: EvalKitClient): Promise<void> {
+  if (registering) {
+    await registering;
+    repointInstrumentations(client.provider);
+    return;
+  }
+  registering = registerOtelInstrumentations(client);
+  await registering;
+}
+
+function repointInstrumentations(provider: TracerProvider): void {
+  if (!registered || registered.provider === provider) return;
+  registered.provider = provider;
+  for (const inst of registered.instrumentations) {
+    try { (inst as { setTracerProvider?: (p: TracerProvider) => void }).setTracerProvider?.(provider); } catch {}
+  }
+}
+
+async function registerOtelInstrumentations(client: EvalKitClient): Promise<void> {
   try {
     const reg = (await dynImport('@opentelemetry/instrumentation'))?.registerInstrumentations;
     if (!reg) return;
@@ -322,7 +365,11 @@ async function tryRegisterOtelInstrumentations(client: EvalKitClient): Promise<v
         } catch {}
       }
     }
-    if (instrumentations.length) reg({ instrumentations, tracerProvider: client.provider });
+    if (instrumentations.length) {
+      const provider = client.provider;
+      reg({ instrumentations, tracerProvider: provider });
+      registered = { instrumentations, provider };
+    }
   } catch {}
 }
 

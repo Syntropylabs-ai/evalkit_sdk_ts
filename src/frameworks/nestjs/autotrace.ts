@@ -1,4 +1,7 @@
+import { context as otelContext } from '@opentelemetry/api';
+import { suppressTracing } from '@opentelemetry/core';
 import type { EvalKitClient } from '../../core/client.js';
+import { isHealthCheck } from '../../utils/health-check.js';
 
 const SKIP = new Set([
   'constructor',
@@ -40,6 +43,49 @@ function copyReflectMetadata(from: object, to: object): void {
   }
 }
 
+// The metadata key under which Nest's @Controller() and @Get()/@Post()/... decorators keep a route's path.
+const PATH_METADATA = 'path';
+
+function metadataPaths(value: unknown): string[] {
+  const list = Array.isArray(value) ? value : [value];
+  return list.filter((p): p is string => typeof p === 'string');
+}
+
+/**
+ * Whether a controller method is the handler of a health or readiness probe route, by the paths Nest's
+ * decorators recorded on the controller and on the method. A method with no route of its own is not one.
+ */
+function isProbeHandler(controller: unknown, handler: unknown): boolean {
+  try {
+    const R = (globalThis as { Reflect?: any }).Reflect as any;
+    if (!R || typeof R.getMetadata !== 'function' || !controller || !handler) return false;
+    const own = metadataPaths(R.getMetadata(PATH_METADATA, handler));
+    if (!own.length) return false;
+    const bases = metadataPaths(R.getMetadata(PATH_METADATA, controller));
+    const paths = (bases.length ? bases : ['/']).flatMap((base) => own.map((path) => `/${base}/${path}`));
+    return paths.every((path) => isHealthCheck(path));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A probe handler runs with tracing suppressed. The probe's request is not recorded, so each span opened inside
+ * it, by a traced service it calls or a model or database call, would be a trace of its own on every poll. The
+ * suppression lasts as long as the handler's own work.
+ */
+function untraced(fn: (...args: unknown[]) => unknown): (...args: unknown[]) => unknown {
+  return function (this: unknown, ...args: unknown[]) {
+    let ctx: ReturnType<typeof otelContext.active>;
+    try {
+      ctx = suppressTracing(otelContext.active());
+    } catch {
+      return fn.apply(this, args);
+    }
+    return otelContext.with(ctx, fn, this, ...args);
+  };
+}
+
 export function autoTraceNest(
   client: EvalKitClient,
   discovery: DiscoveryLike,
@@ -69,7 +115,8 @@ export function autoTraceNest(
       if ((desc.value as { __evalkitTraced?: boolean }).__evalkitTraced) continue;
 
       const original = desc.value as (...args: unknown[]) => unknown;
-      const traced = client.traceFunction(`${className}.${name}`, original, undefined, captureIO);
+      const probe = isProbeHandler(instance.constructor, original);
+      const traced = probe ? untraced(original) : client.traceFunction(`${className}.${name}`, original, undefined, captureIO);
 
       copyReflectMetadata(original, traced);
       try { Object.defineProperty(traced, 'name', { value: name, configurable: true }); } catch {  }
@@ -77,7 +124,7 @@ export function autoTraceNest(
 
       (traced as { __evalkitTraced?: boolean }).__evalkitTraced = true;
       Object.defineProperty(proto, name, { ...desc, value: traced });
-      methods++;
+      if (!probe) methods++;
     }
   }
   return methods;

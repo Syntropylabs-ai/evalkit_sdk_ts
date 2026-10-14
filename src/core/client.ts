@@ -8,6 +8,9 @@ import { errorAttrs } from "./errors-util.js";
 import { resolveCaptureContent, resolveCaptureSecrets } from "./redact.js";
 import { resolveExportGzip } from "./exporter.js";
 import { setCaptureSecrets } from "../utils/headers.js";
+import { setGuardDebug, swallow } from "./guard.js";
+import { FunctionIO, ioString } from "./function-io.js";
+import { runBeforeFlush } from "./flush-hooks.js";
 import {
   agentAttributes,
   agentNameOf,
@@ -51,31 +54,11 @@ function definedIdentity(options: Identity): Identity {
   return out;
 }
 
-const SDK_VERSION = "0.3.4";
+const SDK_VERSION = "0.3.5";
 
-const IO_MAX = 4096;
-
-function safeIO(value: unknown, limit: number = IO_MAX): string | undefined {
-  if (value === undefined) return undefined;
-  let s: string | undefined;
-  try {
-    s = JSON.stringify(value);
-  } catch {
-
-  }
-  if (s === undefined) {
-    try {
-      s = String(value);
-    } catch {
-      s = "<unserializable>";
-    }
-  }
-  return s.length > limit ? s.slice(0, limit) + "…" : s;
-}
-
-function ioAttr(key: string, value: unknown, captureIO: boolean): Record<string, string> | undefined {
-  if (!captureIO) return undefined;
-  const s = safeIO(value);
+function ioAttr(key: string, value: unknown, record: boolean, scrub: boolean): Record<string, string> | undefined {
+  if (!record) return undefined;
+  const s = ioString(value, scrub);
   return s === undefined ? undefined : { [key]: s };
 }
 
@@ -117,12 +100,16 @@ export class EvalKitClient {
     };
 
     setCaptureSecrets(this.options.captureSecrets);
+    setGuardDebug(this.options.debug);
 
     const tracing = resolveTracing(
       {
         baseUrl: this.options.baseUrl,
         subscriptionKey: this.options.subscriptionKey,
         serviceName: this.options.serviceName,
+        environment: this.options.environment,
+        appVersion: this.options.appVersion,
+        deviceId: this.options.deviceId,
         debug: this.options.debug,
         maxExportBatchSize: this.options.maxExportBatchSize,
         scheduledDelayMillis: this.options.scheduledDelayMillis,
@@ -278,15 +265,20 @@ export class EvalKitClient {
     captureIO: boolean = true,
   ): T {
     const self = this;
+    const io = captureIO ? new FunctionIO(fn, name) : undefined;
     return function (this: any, ...args: any[]) {
 
       let ctx: OtelContext;
       let end: (status?: 'OK' | 'ERROR', extra?: Record<string, string | number | boolean>) => void;
+      let record = false;
+      let scrub = true;
       try {
+        scrub = !self.options.captureSecrets;
+        record = !!io && (!scrub || !io.secretFunction);
         const startAttrs: Record<string, string | number | boolean> = {
           'evalkit.span_type': 'function_call',
           ...attributes,
-          ...(captureIO && args.length ? ioAttr('function.args', args, captureIO) : undefined),
+          ...(record && args.length ? ioAttr('function.args', scrub ? io!.arguments(args) : args, record, scrub) : undefined),
         };
         const s = self.startSpan(name, startAttrs);
         ctx = s.ctx; end = s.end;
@@ -310,7 +302,7 @@ export class EvalKitClient {
 
       if (result && typeof result.then === 'function') {
         return result.then(
-          (v: any) => { safeEnd('OK', ioAttr('function.result', v, captureIO)); return v; },
+          (v: any) => { safeEnd('OK', ioAttr('function.result', v, record, scrub)); return v; },
           (e: any) => {
             const error = e instanceof Error ? e : new Error(String(e));
             try { trace.getSpan(ctx)?.recordException(error); } catch {  }
@@ -320,7 +312,7 @@ export class EvalKitClient {
         ) as any;
       }
 
-      safeEnd('OK', ioAttr('function.result', result, captureIO));
+      safeEnd('OK', ioAttr('function.result', result, record, scrub));
       return result;
     } as T;
   }
@@ -332,16 +324,22 @@ export class EvalKitClient {
     captureIO: boolean = true,
   ): T {
     const self = this;
+    const io = captureIO ? new FunctionIO(fn, name) : undefined;
     return function (this: any, ...args: any[]) {
       let ctx: OtelContext;
       let end: (status?: 'OK' | 'ERROR', extra?: Record<string, string | number | boolean>) => void;
+      let record = false;
+      let scrub = true;
       try {
+        scrub = !self.options.captureSecrets;
+        record = !!io && (!scrub || !io.secretFunction);
+        const recorded = record && scrub ? io!.arguments(args) : args;
         const startAttrs: Record<string, string | number | boolean> = {
           'evalkit.span_type': 'tool_call',
           'tool.name': name,
           'gen_ai.tool.name': name,
           ...attributes,
-          ...(captureIO && args.length ? ioAttr('tool.arguments', args.length === 1 ? args[0] : args, captureIO) : undefined),
+          ...(record && args.length ? ioAttr('tool.arguments', recorded.length === 1 ? recorded[0] : recorded, record, scrub) : undefined),
         };
         const s = self.startSpan(name, startAttrs);
         ctx = s.ctx; end = s.end;
@@ -365,7 +363,7 @@ export class EvalKitClient {
 
       if (result && typeof result.then === 'function') {
         return result.then(
-          (v: any) => { safeEnd('OK', ioAttr('tool.result', v, captureIO)); return v; },
+          (v: any) => { safeEnd('OK', ioAttr('tool.result', v, record, scrub)); return v; },
           (e: any) => {
             const error = e instanceof Error ? e : new Error(String(e));
             try { trace.getSpan(ctx)?.recordException(error); } catch {  }
@@ -375,21 +373,37 @@ export class EvalKitClient {
         ) as any;
       }
 
-      safeEnd('OK', ioAttr('tool.result', result, captureIO));
+      safeEnd('OK', ioAttr('tool.result', result, record, scrub));
       return result;
     } as T;
   }
 
-  async flush(): Promise<void> {
-    await this.processor.forceFlush();
+  /**
+   * Sends every span ended so far. It resolves whether or not the receiver took them, since the app awaits it
+   * on its way out and a tracing failure must not fail the app: true when the export succeeded, false when it
+   * did not (the reason is logged with `debug: true`).
+   */
+  async flush(): Promise<boolean> {
+    try {
+      runBeforeFlush();
+      await this.processor.forceFlush();
+      return true;
+    } catch (err) {
+      swallow("flushing spans", err);
+      return false;
+    }
   }
 
+  /**
+   * Stops this client's exporting: its processor leaves the provider and flushes what it holds. The provider
+   * itself stays, the app's own or the one the SDK registered for the process, which a later init() reuses.
+   */
   async destroy(): Promise<void> {
-    if (this.tracingMode !== "attached") {
-      await (this.provider as unknown as { shutdown(): Promise<void> }).shutdown();
-      return;
-    }
     detachSpanProcessor(this.provider, this.processor);
-    await this.processor.shutdown();
+    try {
+      await this.processor.shutdown();
+    } catch (err) {
+      swallow("shutting down the exporter", err);
+    }
   }
 }

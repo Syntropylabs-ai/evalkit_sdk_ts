@@ -1,5 +1,6 @@
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody, startVectorDb } from "./_common.js";
+import { claimPatch } from "../_patched.js";
 
 const CONNECT_FNS = ["connectToLocal", "connectToWeaviateCloud", "connectToCustom", "connectToWCS", "connectToWCD"] as const;
 
@@ -7,7 +8,7 @@ export function patchWeaviateModule(client: EvalKitClient, mod: any): void {
   if (!mod) return;
   for (const fnName of CONNECT_FNS) {
     const original = mod[fnName];
-    if (typeof original !== "function" || original.__evalkit) continue;
+    if (typeof original !== "function" || original.__evalkit || !claimPatch(mod, fnName)) continue;
 
     const wrapped = async function (this: any, ...args: any[]) {
       const weaviateClient = await original.apply(this, args);
@@ -30,7 +31,7 @@ export function patchWeaviateClientInstance(client: EvalKitClient, weaviateClien
 
 function wrapCollectionsAccessor(client: EvalKitClient, weaviateClient: any): void {
   const collections = weaviateClient?.collections;
-  if (!collections || collections.__evalkit) return;
+  if (!collections || collections.__evalkit || !claimPatch(collections, "get")) return;
 
   for (const accessor of ["get", "use"] as const) {
     const original = collections[accessor];

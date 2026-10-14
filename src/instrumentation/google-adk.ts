@@ -1,5 +1,6 @@
 import { SpanKind, SpanStatusCode, type Span } from "@opentelemetry/api";
 import type { EvalKitClient } from "../core/client.js";
+import { claimPatch } from "./_patched.js";
 
 const IO_MAX = 8192;
 
@@ -29,6 +30,7 @@ export function patchGoogleAdk(client: EvalKitClient, adkModule: any): void {
   const BasePlugin = adkModule?.BasePlugin;
   if (!Runner?.prototype || !BaseAgent?.prototype || !BasePlugin) return;
   if ((Runner.prototype.runAsync as { __evalkit?: boolean })?.__evalkit) return;
+  if (!claimPatch(Runner.prototype, "runAsync")) return;
 
   const toolSpans = new WeakMap<object, Span>();
 

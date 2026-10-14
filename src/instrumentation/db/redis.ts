@@ -1,5 +1,6 @@
 import { trace, context as otelContext, SpanKind, SpanStatusCode } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
+import { claimPatch } from '../_patched.js';
 
 export function patchRedis(client: EvalKitClient, redisInstance: any): void {
 
@@ -14,6 +15,7 @@ export function patchRedis(client: EvalKitClient, redisInstance: any): void {
     typeof proto.call === 'function' ? 'call' : null;
 
   if (!methodName) return;
+  if (!claimPatch(proto, methodName)) return;
 
   const orig = proto[methodName];
 

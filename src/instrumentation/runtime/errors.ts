@@ -35,12 +35,17 @@ export function patchErrors(client: EvalKitClient): void {
   if (_installed) return;
   _installed = true;
 
+  // Installed once per process; a later init() that turns capture off silences them, but the exit an
+  // uncaught exception owes the process stays.
   process.on('unhandledRejection', (reason: unknown) => {
+    if (!client.options.captureGlobalErrors) return;
     emitErrorSpan(client, 'error.unhandled_rejection', reason instanceof Error ? reason : new Error(String(reason)));
   });
 
   process.prependListener('uncaughtException', (err: Error) => {
-    emitErrorSpan(client, 'error.uncaught_exception', err instanceof Error ? err : new Error(String(err)));
+    if (client.options.captureGlobalErrors) {
+      emitErrorSpan(client, 'error.uncaught_exception', err instanceof Error ? err : new Error(String(err)));
+    }
     if (process.listenerCount('uncaughtException') === 1) {
       setImmediate(() => process.exit(1));
     }

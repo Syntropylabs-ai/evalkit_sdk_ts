@@ -12,6 +12,7 @@ import {
   streamException,
   teeAsyncIterable,
 } from "./_stream.js";
+import { claimPatch } from "../../_patched.js";
 
 type AgentClient = {
   send: (...args: unknown[]) => Promise<unknown>;
@@ -192,6 +193,7 @@ export function patchBedrockAgentRuntime(
 ): void {
   if (typeof agentClient?.send !== 'function') return;
   if ((agentClient.send as any).__evalkit) return;
+  if (!claimPatch(agentClient, "send")) return;
 
   const original = agentClient.send;
 

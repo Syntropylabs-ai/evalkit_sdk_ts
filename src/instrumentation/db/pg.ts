@@ -1,9 +1,11 @@
 import { trace, context as otelContext, SpanKind, SpanStatusCode } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
+import { claimPatch } from '../_patched.js';
 
 export function patchPg(client: EvalKitClient, pgInstance: any): void {
   const proto = pgInstance?.prototype ?? Object.getPrototypeOf(pgInstance);
   if (!proto || proto.__evalkit_pg) return;
+  if (!claimPatch(proto, 'query')) return;
 
   const origQuery = proto.query;
   if (typeof origQuery !== 'function') return;

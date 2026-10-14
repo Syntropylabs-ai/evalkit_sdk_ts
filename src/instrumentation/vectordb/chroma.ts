@@ -1,5 +1,6 @@
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody, startVectorDb } from "./_common.js";
+import { claimPatch } from "../_patched.js";
 
 function ownMethod(proto: any, name: string): boolean {
   return !!proto && Object.prototype.hasOwnProperty.call(proto, name) && typeof proto[name] === "function";
@@ -32,7 +33,7 @@ function flattenMatches(result: any): Array<{ id: any; distance: any }> {
 }
 
 function patchQuery(client: EvalKitClient, proto: any): void {
-  if (proto.query.__evalkit) return;
+  if (proto.query.__evalkit || !claimPatch(proto, "query")) return;
   const original = proto.query;
 
   proto.query = async function (this: any, args: any = {}) {
@@ -63,7 +64,7 @@ function patchQuery(client: EvalKitClient, proto: any): void {
 }
 
 function patchAddOrUpsert(client: EvalKitClient, proto: any, method: "add" | "upsert"): void {
-  if (proto[method].__evalkit) return;
+  if (proto[method].__evalkit || !claimPatch(proto, method)) return;
   const original = proto[method];
 
   proto[method] = async function (this: any, args: any = {}) {

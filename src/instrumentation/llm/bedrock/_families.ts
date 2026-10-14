@@ -1,4 +1,5 @@
 import { fromAnthropicBlocks, fromOpenAIChat } from "../_toolcalls.js";
+import { StreamToolCalls } from "../_stream.js";
 import type { NormalizedToolCall } from "../_toolcalls.js";
 
 export type BedrockFamily =
@@ -357,6 +358,7 @@ export function createInvokeStreamAccumulator(family: BedrockFamily): BedrockStr
   let completion = '';
   let thinking = '';
   let firstTextMs: number | undefined;
+  const tools = new StreamToolCalls();
 
   const setNumber = (key: keyof BedrockUsage, value: number | undefined) => {
     if (value !== undefined) info[key] = value;
@@ -382,10 +384,20 @@ export function createInvokeStreamAccumulator(family: BedrockFamily): BedrockStr
       setNumber('outputTokens', num(chunk?.message?.usage?.output_tokens));
       setNumber('cacheReadTokens', num(chunk?.message?.usage?.cache_read_input_tokens));
       setNumber('cacheWriteTokens', num(chunk?.message?.usage?.cache_creation_input_tokens));
+    } else if (type === 'content_block_start') {
+      const block = chunk?.content_block;
+      if (block?.type === 'tool_use') {
+        const entry = tools.entry(String(chunk?.index ?? 0));
+        tools.describe(entry, block.name, block.id);
+        if (block.input && typeof block.input === 'object' && Object.keys(block.input).length > 0) {
+          tools.setArguments(entry, block.input);
+        }
+      }
     } else if (type === 'content_block_delta') {
       const delta = chunk?.delta;
       if (delta?.type === 'text_delta') completion += str(delta.text) ?? '';
       else if (delta?.type === 'thinking_delta') thinking += str(delta.thinking) ?? '';
+      else if (delta?.type === 'input_json_delta') tools.appendArguments(tools.entry(String(chunk?.index ?? 0)), delta.partial_json);
     } else if (type === 'message_delta') {
       const reason = str(chunk?.delta?.stop_reason);
       if (reason) info.finishReason = reason;
@@ -428,14 +440,16 @@ export function createInvokeStreamAccumulator(family: BedrockFamily): BedrockStr
       else if (family === 'nova') pushNova(chunk);
       else pushGeneric(chunk);
       invocationMetrics(chunk);
-      if (firstTextMs === undefined && completion.length > 0) firstTextMs = Date.now();
+      if (firstTextMs === undefined && (completion.length > 0 || thinking.length > 0)) firstTextMs = Date.now();
     },
     snapshot(): BedrockStreamSnapshot {
+      const toolCalls = tools.calls();
       return {
         ...info,
         completion,
         ...(thinking && { thinking }),
         ...(firstTextMs !== undefined && { firstTextMs }),
+        ...(toolCalls.length > 0 && { toolCalls }),
       };
     },
   };

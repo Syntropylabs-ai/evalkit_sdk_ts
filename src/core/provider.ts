@@ -7,7 +7,7 @@ import { resourceFromAttributes } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import type { Context as OtelContext } from "@opentelemetry/api";
 import type { ReadableSpan, Span } from "@opentelemetry/sdk-trace-base";
-import { EvalKitExporter } from "./exporter.js";
+import { EvalKitExporter, markSdkResource } from "./exporter.js";
 import type { MaskHook } from "./redact.js";
 import { activePromptRef, promptAttributes } from "./prompt-context.js";
 import { captureStartScope } from "./identity.js";
@@ -17,6 +17,9 @@ export interface SpanPipelineOptions {
   baseUrl: string;
   subscriptionKey: string;
   serviceName: string;
+  environment?: string;
+  appVersion?: string;
+  deviceId?: string;
   debug: boolean;
   maxExportBatchSize: number;
   scheduledDelayMillis: number;
@@ -95,6 +98,9 @@ export function createSpanProcessor(opts: SpanPipelineOptions): SpanProcessor {
     baseUrl: opts.baseUrl,
     subscriptionKey: opts.subscriptionKey,
     serviceName: opts.serviceName,
+    environment: opts.environment,
+    appVersion: opts.appVersion,
+    deviceId: opts.deviceId,
     debug: opts.debug,
     captureContent: opts.captureContent,
     captureSecrets: opts.captureSecrets,
@@ -151,11 +157,16 @@ export function installedTracerProvider(): TracerProvider | undefined {
   }
 }
 
+// The provider the SDK registered as the global one. It lives as long as the process: a later init()
+// attaches its own exporter to it, and spans from libraries that cached a tracer of it keep flowing.
+let sdkProvider: TracerProvider | undefined;
+
 function createUnregisteredProvider(serviceName: string, processor: SpanProcessor): NodeTracerProvider {
-  return new NodeTracerProvider({
-    resource: resourceFromAttributes({ [ATTR_SERVICE_NAME]: serviceName }),
-    spanProcessors: [processor],
-  });
+  const resource = resourceFromAttributes({ [ATTR_SERVICE_NAME]: serviceName });
+  // The exporter names the SDK's own spans by its current options, not by the service name this
+  // resource was built with, since a later init() reuses the provider.
+  markSdkResource(resource);
+  return new NodeTracerProvider({ resource, spanProcessors: [processor] });
 }
 
 export function resolveTracing(opts: SpanPipelineOptions, explicit?: TracerProvider): ResolvedTracing {
@@ -176,13 +187,14 @@ export function resolveTracing(opts: SpanPipelineOptions, explicit?: TracerProvi
 
   const installed = installedTracerProvider();
   if (installed && attachSpanProcessor(installed, processor)) {
-    return { provider: installed, processor, mode: "attached" };
+    return { provider: installed, processor, mode: installed === sdkProvider ? "owned" : "attached" };
   }
 
   const provider = createUnregisteredProvider(opts.serviceName, processor);
 
   if (trace.setGlobalTracerProvider(provider)) {
     provider.register();
+    sdkProvider = provider;
     return { provider, processor, mode: "owned" };
   }
 

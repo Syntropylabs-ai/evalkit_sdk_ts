@@ -1,9 +1,11 @@
 import { SpanKind, SpanStatusCode, context as otelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody } from "./_body.js";
+import { claimPatch } from "../_patched.js";
 
 function patchConvert(client: EvalKitClient, proto: any): void {
   if (typeof proto?.convert !== "function" || proto.convert.__evalkit) return;
+  if (!claimPatch(proto, "convert")) return;
   const original = proto.convert;
 
   async function traced(this: any, voiceId: string, body: any = {}, ...rest: any[]) {

@@ -6,6 +6,11 @@ import { emitToolCalls, fromLangChainResult } from "../_toolcalls.js";
 import { safeBody } from "../_body.js";
 import { samplingAttrs, toolAttrs } from "../_request.js";
 import { dynImport, getRequire } from "../../../utils/dynimport.js";
+import { claimPatch } from "../../_patched.js";
+import { setFrameworkModelRunClaimer } from "../../../core/framework-model-call.js";
+import type { FrameworkModelRun } from "../../../core/framework-model-call.js";
+import { takeGraphRoot } from "./langgraph.js";
+import { beforeFlush } from "../../../core/flush-hooks.js";
 
 function loadLangChainModule(specifier: string): any {
   try {
@@ -136,8 +141,126 @@ function llmResultTokens(output: any): { tin: number; tout: number } {
   return { tin: tin || 0, tout: tout || 0 };
 }
 
+// A chat model's run waits for its end before it is recorded: a provider call made inside it claims it, and
+// the provider's span is then the record, in the run's place and with its LangGraph attributes.
+type PendingModelRun = {
+  runId: string;
+  leave?: () => void;
+  parentRunId: string | undefined;
+  parentCtx: OtelContext;
+  name: string;
+  attributes: Record<string, string | number | boolean | string[]>;
+  langgraph: Record<string, string | number>;
+  startTime: Date;
+  claimed: boolean;
+};
+
+const openModelRuns = new Map<string, PendingModelRun>();
+
+const LC_STORAGE = Symbol.for("ls:tracing_async_local_storage");
+const LC_CHILD_CONFIG = Symbol.for("lc:child_config");
+
+/** The run LangChain is executing in this async context (a LangGraph node), from LangChain's own storage. */
+function currentLangChainParentRunId(): string | undefined {
+  try {
+    const storage = (globalThis as Record<symbol, any>)[LC_STORAGE];
+    const config = storage?.getStore?.()?.extra?.[LC_CHILD_CONFIG];
+    const id = config?.callbacks?.getParentRunId?.();
+    return typeof id === "string" ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function claimOpenModelRun(): FrameworkModelRun | undefined {
+  if (openModelRuns.size === 0) return undefined;
+  const parent = currentLangChainParentRunId();
+  const open = [...openModelRuns.values()].filter((run) => !run.claimed);
+  const candidates = parent !== undefined ? open.filter((run) => run.parentRunId === parent) : open;
+  // Without LangChain's context to tell runs apart, only a single open run is taken.
+  if (candidates.length === 0 || (parent === undefined && candidates.length > 1)) return undefined;
+  const run = candidates[0];
+  run.claimed = true;
+  return { ctx: run.parentCtx, attributes: run.langgraph };
+}
+
+setFrameworkModelRunClaimer(claimOpenModelRun);
+
+// How long a root opened for runs whose parent was never seen stays open after its last run ended, for the
+// graph's next step to join it.
+const ADOPTED_ROOT_IDLE_MS = 1000;
+
+type AdoptedRoot = { span: Span; ctx: OtelContext; open: Set<string>; lastEnd: Date; lastStep: number; timer?: ReturnType<typeof setTimeout> };
+
+// The key of the root shared by graph steps that reached the handler with no parent run at all: a graph
+// invoked before the handler was attached reports its steps that way.
+const UNPARENTED_GRAPH = "\u0000unparented-graph";
+
 export function langchainHandlerMethods(client: EvalKitClient): Record<string, (...args: any[]) => void> {
-  const runs = new Map<string, { span: Span; ctx: OtelContext }>();
+  const runs = new Map<string, { span: Span; ctx: OtelContext; owned: boolean; root?: AdoptedRoot }>();
+  // Runs whose parent run started before this handler was attached (in an ES module app, a graph invoked
+  // straight after its imports runs before the SDK's patches land) share one root per unseen parent, so a
+  // graph's steps stay one trace.
+  const adopted = new Map<string, AdoptedRoot>();
+
+  function endAdopted(parentRunId: string, root: AdoptedRoot): void {
+    if (root.timer) clearTimeout(root.timer);
+    adopted.delete(parentRunId);
+    try {
+      root.span.setStatus({ code: SpanStatusCode.OK });
+      root.span.end(root.lastEnd);
+    } catch {  }
+  }
+
+  beforeFlush(() => {
+    for (const [id, root] of adopted) if (root.open.size === 0) endAdopted(id, root);
+  });
+
+  function adoptedRoot(parentRunId: string, inGraph: boolean): AdoptedRoot {
+    let root = adopted.get(parentRunId);
+    if (!root) {
+      const name = inGraph ? "LangGraph" : "LangChain";
+      const span = client.tracer.startSpan(name, {
+        kind: SpanKind.INTERNAL,
+        attributes: { "evalkit.span_type": "function_call", "evalkit.framework": name === "LangGraph" ? "langgraph" : "langchain" },
+      }, otelContext.active());
+      root = { span, ctx: trace.setSpan(otelContext.active(), span), open: new Set(), lastEnd: new Date(), lastStep: -1 };
+      adopted.set(parentRunId, root);
+    }
+    return root;
+  }
+
+  /** The context a run starts in: its parent run's, an adopted root's, or the app's. */
+  function placeRun(runId: string, parentRunId: string | undefined, inGraph: boolean, step?: unknown): { ctx: OtelContext; root?: AdoptedRoot } {
+    const parent = parentRunId ? runs.get(parentRunId) : undefined;
+    if (parent) return { ctx: parent.ctx };
+    if (trace.getActiveSpan()?.isRecording()) return { ctx: otelContext.active() };
+    // Steps that come without a parent belong to one invocation while they keep coming; a step number lower
+    // than the last one is the next invocation.
+    const key = parentRunId ?? (inGraph ? UNPARENTED_GRAPH : undefined);
+    if (key) {
+      const current = adopted.get(key);
+      if (current && typeof step === "number" && step < current.lastStep && key === UNPARENTED_GRAPH) endAdopted(key, current);
+      const root = adoptedRoot(key, inGraph);
+      if (typeof step === "number") root.lastStep = Math.max(root.lastStep, step);
+      if (root.timer) { clearTimeout(root.timer); root.timer = undefined; }
+      root.open.add(runId);
+      return { ctx: root.ctx, root };
+    }
+    return { ctx: otelContext.active() };
+  }
+
+  function leaveRoot(runId: string, root: AdoptedRoot | undefined): void {
+    if (!root || !root.open.delete(runId)) return;
+    root.lastEnd = new Date();
+    if (root.open.size > 0) return;
+    for (const [id, r] of adopted) {
+      if (r !== root) continue;
+      root.timer = setTimeout(() => endAdopted(id, root), ADOPTED_ROOT_IDLE_MS);
+      (root.timer as { unref?: () => void }).unref?.();
+    }
+  }
+
 
   function startRun(
     runId: string,
@@ -147,14 +270,24 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
     attributes: Record<string, string | number | boolean | string[]>,
   ): void {
     try {
-      const parent = parentRunId ? runs.get(parentRunId) : undefined;
-      const parentCtx = parent ? parent.ctx : otelContext.active();
+      const placed = placeRun(runId, parentRunId, "langgraph.node" in attributes, attributes["langgraph.step"]);
+      const parentCtx = placed.ctx;
+      // The graph's own run, which has no parent, inside the root span the SDK opened for the invocation, is
+      // that span.
+      if (spanType === "function_call" && !parentRunId) {
+        const root = trace.getSpan(parentCtx);
+        if (root && takeGraphRoot(root)) {
+          root.setAttributes(attributes);
+          runs.set(runId, { span: root, ctx: parentCtx, owned: false });
+          return;
+        }
+      }
       const span = client.tracer.startSpan(
         name,
         { kind: spanType === "llm_call" ? SpanKind.CLIENT : SpanKind.INTERNAL, attributes: { "evalkit.span_type": spanType, "evalkit.framework": "langchain", ...attributes } },
         parentCtx,
       );
-      runs.set(runId, { span, ctx: trace.setSpan(parentCtx, span) });
+      runs.set(runId, { span, ctx: trace.setSpan(parentCtx, span), owned: true, root: placed.root });
     } catch {  }
   }
 
@@ -163,9 +296,63 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
       const rec = runs.get(runId);
       if (!rec) return;
       runs.delete(runId);
+      leaveRoot(runId, rec.root);
+      if (!rec.owned) return;
       if (attrs) rec.span.setAttributes(attrs);
       rec.span.setStatus({ code: status === "OK" ? SpanStatusCode.OK : SpanStatusCode.ERROR, message });
       rec.span.end();
+    } catch {  }
+  }
+
+  function startModelRun(
+    runId: string,
+    parentRunId: string | undefined,
+    name: string,
+    attributes: Record<string, string | number | boolean | string[]>,
+    metadata: any,
+  ): void {
+    try {
+      const langgraph = langgraphAttrs(metadata);
+      const placed = placeRun(runId, parentRunId, "langgraph.node" in langgraph, langgraph["langgraph.step"]);
+      openModelRuns.set(runId, {
+        runId,
+        leave: () => leaveRoot(runId, placed.root),
+        parentRunId,
+        parentCtx: placed.ctx,
+        name,
+        attributes: { ...attributes, ...langgraph },
+        langgraph,
+        startTime: new Date(),
+        claimed: false,
+      });
+    } catch {  }
+  }
+
+  /** The model run's span, recorded now that it ended, unless a provider call recorded it. */
+  function endModelRun(
+    runId: string,
+    status: "OK" | "ERROR",
+    attrs?: Record<string, string | number | boolean>,
+    message?: string,
+    output?: any,
+  ): void {
+    try {
+      const run = openModelRuns.get(runId);
+      if (!run) return;
+      openModelRuns.delete(runId);
+      run.leave?.();
+      if (run.claimed) return;
+      const span = client.tracer.startSpan(
+        run.name,
+        { kind: SpanKind.CLIENT, startTime: run.startTime, attributes: { "evalkit.span_type": "llm_call", "evalkit.framework": "langchain", ...run.attributes } },
+        run.parentCtx,
+      );
+      if (attrs) span.setAttributes(attrs);
+      if (output !== undefined) {
+        try { emitToolCalls(client, span, fromLangChainResult(output)); } catch {  }
+      }
+      span.setStatus({ code: status === "OK" ? SpanStatusCode.OK : SpanStatusCode.ERROR, message });
+      span.end();
     } catch {  }
   }
 
@@ -183,44 +370,43 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
     handleLLMStart(llm: any, prompts: string[], runId: string, parentRunId?: string, extraParams?: any, _tags?: string[], metadata?: any) {
       const model = modelFrom(llm, extraParams);
       const reqBody = safeBody({ prompts: prompts ?? [], invocation_params: extraParams?.invocation_params });
-      startRun(runId, parentRunId, "llm_call", "llm.generate", {
+      startModelRun(runId, parentRunId, "llm.generate", {
         "gen_ai.request.model": model,
         "gen_ai.system": providerFrom(llm) ?? "",
         ...invocationAttrs(extraParams),
-        ...langgraphAttrs(metadata),
         "evalkit.prompt": truncate((prompts ?? []).join("\n")),
         ...(reqBody ? { "gen_ai.request.body": reqBody } : {}),
-      });
+      }, metadata);
     },
     handleChatModelStart(llm: any, messages: any, runId: string, parentRunId?: string, extraParams?: any, _tags?: string[], metadata?: any) {
       const model = modelFrom(llm, extraParams);
       const reqBody = safeBody({ messages, invocation_params: extraParams?.invocation_params });
-      startRun(runId, parentRunId, "llm_call", "chat.generate", {
+      startModelRun(runId, parentRunId, "chat.generate", {
         "gen_ai.request.model": model,
         "gen_ai.system": providerFrom(llm) ?? "",
         ...invocationAttrs(extraParams),
-        ...langgraphAttrs(metadata),
         "evalkit.prompt": messagesToPrompt(messages),
         ...(reqBody ? { "gen_ai.request.body": reqBody } : {}),
-      });
+      }, metadata);
     },
     handleLLMEnd(output: any, runId: string) {
+      const pending = openModelRuns.get(runId);
+      if (pending?.claimed) {
+        openModelRuns.delete(runId);
+        pending.leave?.();
+        return;
+      }
       const { tin, tout } = llmResultTokens(output);
-      const rec = runs.get(runId);
-
-      try {
-        if (rec) emitToolCalls(client, rec.span, fromLangChainResult(output));
-      } catch {  }
       const respBody = safeBody(output);
-      endRun(runId, "OK", {
+      endModelRun(runId, "OK", {
         "evalkit.completion": llmResultCompletion(output),
         "gen_ai.usage.input_tokens": tin,
         "gen_ai.usage.output_tokens": tout,
         "gen_ai.usage.total_tokens": tin + tout,
         ...(respBody ? { "gen_ai.response.body": respBody } : {}),
-      });
+      }, undefined, output);
     },
-    handleLLMError(err: any, runId: string) { endRun(runId, "ERROR", undefined, String(err?.message ?? err)); },
+    handleLLMError(err: any, runId: string) { endModelRun(runId, "ERROR", undefined, String(err?.message ?? err)); },
 
     handleToolStart(tool: any, input: string, runId: string, parentRunId?: string, _tags?: string[], metadata?: any, name?: string) {
       const label = name ?? tool?.id?.[tool.id.length - 1] ?? "tool";
@@ -252,6 +438,9 @@ export async function langchainCallbackHandler(client: EvalKitClient): Promise<a
     const base: any = loadLangChainModule("@langchain/core/callbacks/base") ?? await dynImport("@langchain/core/callbacks/base");
     const handler = base.BaseCallbackHandler.fromMethods(langchainHandlerMethods(client));
     (handler as any).name = "evalkit";
+    // Awaited, so a model run is noted before the provider call it makes can look for it. The handler's
+    // methods do no I/O, so awaiting them costs nothing.
+    (handler as any).awaitHandlers = true;
     (handler as any).__evalkit = true;
     return handler;
   } catch {
@@ -265,7 +454,7 @@ export async function patchLangChain(client: EvalKitClient): Promise<any | null>
   try {
     const mgrMod: any = loadLangChainModule("@langchain/core/callbacks/manager") ?? await dynImport("@langchain/core/callbacks/manager");
     const CM = mgrMod.CallbackManager;
-    if (CM && typeof CM._configureSync === "function" && !(CM as any).__evalkitPatched) {
+    if (CM && typeof CM._configureSync === "function" && !(CM as any).__evalkitPatched && claimPatch(CM, "_configureSync")) {
       const original = CM._configureSync.bind(CM);
 
       CM._configureSync = function (this: any, inheritableHandlers: any, ...rest: any[]) {

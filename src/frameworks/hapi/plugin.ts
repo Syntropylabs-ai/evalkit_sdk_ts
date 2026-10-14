@@ -1,6 +1,8 @@
 import { context as otelContext } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
 import { extractTraceparent } from '../../core/context.js';
+import { serverSpanOf, setServerName, setServerRoute } from '../../utils/http-route.js';
+import { isHealthCheck } from '../../utils/health-check.js';
 
 export interface HapiPluginOptions {
   name?: string | ((request: any) => string);
@@ -20,9 +22,19 @@ export function createHapiPlugin(
       }>();
 
       server.ext('onRequest', (request: any, h: any) => {
+        // A health probe is not recorded, as the http server's own instrumentation does not record it.
+        if (isHealthCheck(request.path)) return h.continue;
+
         const traceName = typeof options?.name === 'function'
           ? options.name(request)
           : (options?.name ?? `${String(request.method?.toUpperCase() ?? 'GET')} ${String(request.path ?? '/')}`);
+
+        // On Node's http server the request already has its server span; the plugin names that one, by the
+        // route hapi matched, rather than recording the request a second time.
+        if (serverSpanOf(request.raw?.req)) {
+          if (options?.name !== undefined) setServerName(request.raw.req, traceName);
+          return h.continue;
+        }
 
         const parentCtx = extractTraceparent(
           request.headers?.['traceparent'] as string | undefined
@@ -41,6 +53,8 @@ export function createHapiPlugin(
       });
 
       server.ext('onPreResponse', (request: any, h: any) => {
+        // hapi answers an unmatched request through its own catch-all route, which names nothing.
+        if (request.route?.method !== '_special') setServerRoute(request.raw?.req, request.route?.path);
         const entry = requestEndMap.get(request);
         if (entry) {
           const sc = request.response?.output?.statusCode ??

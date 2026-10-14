@@ -1,5 +1,6 @@
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody, startVectorDb } from "./_common.js";
+import { claimPatch } from "../_patched.js";
 
 function matchesSummary(response: any): Array<{ id: any; score: any }> {
   const out: Array<{ id: any; score: any }> = [];
@@ -18,7 +19,7 @@ export function patchPineconeIndex(client: EvalKitClient, IndexClass: any): void
 }
 
 function patchQuery(client: EvalKitClient, proto: any): void {
-  if (typeof proto.query !== "function" || proto.query.__evalkit) return;
+  if (typeof proto.query !== "function" || proto.query.__evalkit || !claimPatch(proto, "query")) return;
   const original = proto.query;
 
   proto.query = async function (this: any, options: any, ...rest: any[]) {
@@ -48,7 +49,7 @@ function patchQuery(client: EvalKitClient, proto: any): void {
 }
 
 function patchUpsert(client: EvalKitClient, proto: any): void {
-  if (typeof proto.upsert !== "function" || proto.upsert.__evalkit) return;
+  if (typeof proto.upsert !== "function" || proto.upsert.__evalkit || !claimPatch(proto, "upsert")) return;
   const original = proto.upsert;
 
   proto.upsert = async function (this: any, options: any, ...rest: any[]) {

@@ -49,7 +49,7 @@ Call `init()` as early as you can, at the top of your entry point and before oth
 | LLM clients | OpenAI, Anthropic, Bedrock, Cohere, Google, Vertex and LangChain |
 | HTTP | `fetch`, `axios` and `node:http`, with method, URL, status and latency |
 | Databases | Postgres, MySQL, MongoDB and Redis, with query text and latency |
-| Inbound | Every incoming HTTP request becomes a root trace |
+| Inbound | Every incoming HTTP or HTTPS request becomes a root trace, health and readiness probes excepted |
 | Your code | Opt-in per function, tool or class, or the whole app on NestJS |
 
 Provider SDKs are optional peer dependencies, so install only the ones you use:
@@ -69,9 +69,9 @@ Four rules decide the value. They are the same in all four EvalKit SDKs, so the 
 3. Tool-argument deltas do not count. A response that is only a tool call has no first token, so the attribute is absent, not zero.
 4. A failed stream records no first-token time, so a truncated stream cannot skew the percentiles.
 
-The covered providers are OpenAI, Anthropic, Bedrock (`ConverseStream`, `InvokeModelWithResponseStream`, `InvokeAgent`, `InvokeInlineAgent` and `RetrieveAndGenerateStream`), Google GenAI (`generateContentStream`) and Ollama.
+The covered providers are OpenAI (Chat Completions, and the Responses API through `responses.create` with `stream: true` and `responses.stream()`), Anthropic, Bedrock (`ConverseStream`, `InvokeModelWithResponseStream`, `InvokeAgent`, `InvokeInlineAgent` and `RetrieveAndGenerateStream`), Cohere (`chatStream`, and `chat` with `stream: true`), `generateContentStream` of Google GenAI, `@google/generative-ai` and `@google-cloud/vertexai`, and Ollama.
 
-A stream that fails partway is reported with status `ERROR` and the provider's message. The TypeScript SDK attaches the response attributes, such as the completion and the token counts, only when a stream succeeds, so a failed stream carries the error but not the partial output. The Python SDK keeps both. If you need the partial text for debugging, consume the stream inside your own `traceCall` or `traceTool` and record it there.
+A stream that fails partway is reported with status `ERROR` and the provider's message. The span keeps what arrived before the failure: the partial completion, and the token counts the provider had already reported, which it bills. The Python SDK does the same. By rule 4 it has no time to first token.
 
 ## Framework middleware
 
@@ -89,9 +89,11 @@ app.use(evalkit.expressMiddleware());
 
 The adapters are `expressMiddleware()`, `fastifyPlugin()`, `koaMiddleware()`, `honoMiddleware()`, `hapiPlugin()` and `createNestjsInterceptor()`.
 
+Health and readiness probes are not traced, by `init()` or by an adapter, so a load balancer polling every few seconds adds no traces. A probe is a request whose last path segment is `health`, `healthz`, `healthcheck`, `health-check`, `health_check`, `livez`, `readyz` or `startupz`, or whose health segment is followed only by `live`, `liveness`, `ready`, `readiness`, `startup`, `started` or `alive` (`/health/live`, `/actuator/health/readiness`). Segments are matched whole and ignoring case, so `/healthcare` and `/api/health-records` are recorded. Outgoing requests to such paths are not recorded either. The Python SDK decides outgoing requests by the same rule.
+
 ### Trace a whole NestJS app
 
-NestJS has a dependency-injection registry, so the SDK can wrap every provider and controller method for you. Add one line to `main.ts` and pass it the app. The SDK resolves `DiscoveryService` itself, so you do not import `@nestjs/core`:
+NestJS has a dependency-injection registry, so the SDK can wrap every provider and controller method for you. Add one line to `main.ts` and pass it the app. The SDK reads the providers and controllers from the application's own module container, so you import no module for it, `DiscoveryModule` included:
 
 ```ts
 evalkit.init({ subscriptionKey: "tk_live_...", serviceName: "orchestrator" });
@@ -101,7 +103,7 @@ await evalkit.enableNestjsAutoTrace(app);   // ← the only line you add
 await app.listen(5000);
 ```
 
-Route metadata such as `@Get`, `@Body` and guards is kept, and the call never throws.
+Route metadata such as `@Get`, `@Body` and guards is kept, and the call never throws. The handler of a health or readiness probe route is not traced, and nothing it calls is.
 
 ## Trace your own code
 
@@ -141,6 +143,8 @@ try {
 
 await evalkit.flush();   // force-flush before process exit
 ```
+
+`flush()` never rejects. It resolves to `true` when the spans were sent, and to `false` when the export failed or `init()` has not run, so an app that awaits it on its way out is never failed by tracing.
 
 ## Identity
 
@@ -500,7 +504,7 @@ await Eval({ name: "support-golden", data: rows, evaluators: [RULE_ID], hyperpar
 
 Generate simulated-user scenarios from your agent's prompt and tools, play each one against your real agent in your own process, then grade the run with LLM-as-judge evaluators. The server routes need a plan with simulations.
 
-> The live simulated user (`userModel`, `liveUser`, the `transcript`, `endedBy` and `simulatedUserUsage` results) and the scenario briefs that `generateScenarios()` writes by default are in the next release after 0.3.3 (see `CHANGELOG.md`, Unreleased). With 0.3.3, `simulateUser()` replays scripted turns only and `generateScenarios()` writes every turn out.
+> The live simulated user (`userModel`, `liveUser`, the `transcript`, `endedBy` and `simulatedUserUsage` results) and the scenario briefs that `generateScenarios()` writes by default need SDK 0.3.4 or later. With 0.3.3, `simulateUser()` replays scripted turns only and `generateScenarios()` writes every turn out.
 
 ```ts
 import evalkit from "syntropylabs-evalkit";
@@ -729,15 +733,17 @@ When both are set, `captureContent` applies first, so `mask` sees the envelope a
 
 ### Secrets are masked before export
 
-Every envelope goes through a secret scrubber before your `mask` hook runs and before anything leaves the process. It runs whether content capture is on or off, so turning capture off only ever removes more. The scrubber masks secrets by key, by pattern and by URL.
+Every envelope goes through a secret scrubber before your `mask` hook runs and before anything leaves the process. It runs whether content capture is on or off, so turning capture off only ever removes more. The scrubber masks secrets by key, by pattern and by URL, and the arguments of traced functions by parameter name.
 
 #### By key
 
-A value is replaced by `"***"` when its object key matches one of these names, ignoring case, as the whole key or as one segment delimited by dots, underscores or dashes. This applies recursively through objects and arrays, and through attribute values that are JSON strings, which are parsed, scrubbed and serialized again:
+A value is replaced by `"***"` when its object key matches one of these names, ignoring case, as the whole key or as one segment delimited by dots, underscores or dashes. This applies recursively through objects and arrays, through attribute values that are JSON strings, which are parsed, scrubbed and serialized again, and through JSON text that was cut short, such as a body over `maxBodyBytes`, whose members are matched by name all the same:
 
 `api_key`, `api-key`, `apikey`, `secret`, `token`, `password`, `passwd`, `authorization`, `credential`, `credentials`, `subscription_key`, `subscription-key`, `x-subscription-key`, `cookie`, `set-cookie`, `private_key`, `access_key`, `client_secret`.
 
-So `subscriptionKey`, `X-Subscription-Key`, `http.request.api_key` and `credentials.password` are all masked. `token` is the one name matched only as the whole key or as the last segment, because it is also telemetry vocabulary. `prompt_token_count`, `gen_ai.server.time_to_first_token_ms`, `input_tokens` and `tokenizer` are metrics, not credentials, and masking them would blank a dashboard column and protect nothing.
+So `subscriptionKey`, `X-Subscription-Key`, `http.request.api_key` and `credentials.password` are all masked. A camelCase or PascalCase key is split at its capitals first, so `accessToken`, `authToken`, `refreshToken`, `secretKey`, `clientSecret` and `ApiKey` are masked as `access_token` and `secret_key` are, in attributes, bodies and query strings alike. The Python SDK applies the same rule.
+
+`token` is the one name matched only as the whole key or as the last segment, because it is also telemetry vocabulary. `prompt_token_count`, `gen_ai.server.time_to_first_token_ms`, `input_tokens`, `maxTokens`, `totalTokens` and `tokenizer` are metrics, not credentials, and so are the time-to-first-token and time-per-output-token attributes and per-token prices such as `input_cost_per_token` and `inputCostPerAudioToken`; masking them would blank a dashboard column and protect nothing. A camelCase flag about a token, whose first word is `has`, `is`, `needs`, `requires`, `uses`, `use`, `with`, `no`, `supports` or `missing` (`hasToken`, `isTokenValid`), holds a yes or no and keeps its value.
 
 Booleans and numbers under a matching key also become `"***"`, so the shape of the value gives nothing away. `http.request.headers` and `http.response.headers` also go through the list of sensitive headers: `authorization`, `cookie`, `set-cookie`, `x-api-key`, `api-key`, `x-auth-token`, `proxy-authorization`, `x-secret`, `x-access-token`, `x-subscription-key`, `subscription-key`, `token` and `password`.
 
@@ -753,8 +759,17 @@ Inside any string, including attributes, event attributes, the operation, the pr
 | `Bearer\s+[A-Za-z0-9._~+/=-]{8,}` | `Bearer ***` |
 | `AKIA[0-9A-Z]{16}` | `AKIA***` |
 | `ghp_[A-Za-z0-9]{20,}` | `ghp_***` |
+| `AIza[0-9A-Za-z_-]{30,}` (Google API keys) | `AIza***` |
+| A JSON Web Token (`eyJ….eyJ….…`) | `***` |
+| A PEM private key, whole or cut before its `END` line | `***` |
+| The userinfo of a URL or DSN in text (`postgres://user:pass@host`) | `postgres://***@host` |
+| A quoted assignment to a credential name (`password: "…"`, `api_key='…'`) | `password: "***"` |
 
-A string with no secret in it is left exactly as it was, JSON strings included. Nothing is reformatted on the way through.
+A quoted assignment is decided by the name it assigns to, as a key is, so `max_tokens: "5"`, `tokens="7"` and `hasToken: 'yes'` are left alone. A string with no secret in it is left exactly as it was, JSON strings included. Nothing is reformatted on the way through.
+
+#### By parameter name
+
+The arguments that `traceFunction`, `traceTool`, `@TraceMethod`, `@Traced`, `traceObject` and `enableNestjsAutoTrace` record are matched to the parameter they are bound to. One named like a credential (`key`, `apiKey`, `secret`, `token`, `password`, `credentials`, `auth`, `cookie`, `dsn`, `jwt` or `bearer`, in camel or snake case) is recorded as `***`, and so is a member of an options object named that way (`{ accessToken }`). Counts such as `maxTokens` and flags such as `hasToken` keep their values. A function whose own name reads like a credential's (`getApiKey`, `validateToken`) records neither arguments nor result. Names are read from the function's source, so a destructured parameter, a bound or native function and minified code are masked by key and shape only. Arguments and results are masked before they are cut to 4096 characters.
 
 #### By URL
 
@@ -826,7 +841,7 @@ evalkit.init({
 
 Do not add an EvalKit exporter to that provider yourself. EvalKit attaches exactly one export pipeline per provider, and ingest is append-only, so a span sent twice counts twice in the token and cost totals.
 
-`client.destroy()` follows the mode. It shuts down a provider that EvalKit created. Otherwise it flushes and detaches only EvalKit's own span processor, and your tracing keeps running. In `attached` mode your resource sets `service.name`, and `serviceName` is the fallback when the resource has none, or has OpenTelemetry's `unknown_service:` placeholder.
+`client.destroy()` flushes EvalKit's own span processor and detaches it from the provider, in every mode, and never rejects. The provider stays in place, yours or the one EvalKit registered for the process, so your tracing keeps running and a later `init()` reuses it. In `attached` mode your resource sets `service.name`, and `serviceName` is the fallback when the resource has none, or has OpenTelemetry's `unknown_service:` placeholder.
 
 ## Links
 

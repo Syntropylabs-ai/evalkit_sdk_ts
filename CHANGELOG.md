@@ -1,5 +1,160 @@
 # Changelog
 
+## 0.3.5 — 2026-10-14
+
+### Fixed
+- An app's incoming request bodies are no longer lost. To record `http.request.body`, the SDK listened for
+  the request's `data` events, which switched the request into flowing mode: every chunk that arrived
+  before the app's own framework started reading went to the SDK alone. Any app served through Node's
+  `http` server was affected whenever a step before its body parser waited on something. With Express an
+  async middleware before `express.json()` left `req.body` undefined; with Koa an async middleware before
+  `koa-bodyparser` answered 500; with Fastify an async `onRequest` hook left the request hanging with no
+  answer; with hapi `request.payload` was null on every request. The SDK now sees the body only as the
+  framework reads it, and a body nothing reads is not recorded.
+- `flush()` and `destroy()` never reject. When the export fails, `flush()` resolves to `false` (it
+  resolves to `true` when the spans were sent) and the reason is logged with `debug: true`; an
+  `await evalkit.flush()` at the end of a script used to throw when the receiver could not be reached.
+  Before `init()` there is nothing to send and `flush()` resolves to `false` as well; a module-level
+  `await evalkit.flush()` in code that runs without tracing (an `init()` guarded on a key that tests
+  leave unset) rejected with `[evalkit] call evalkit.init() before using the SDK`.
+- `enableNestjsAutoTrace(app)` works on an application that does not import `DiscoveryModule`: it reads
+  the application's own module container. It looked `DiscoveryService` up through `app.get()`, and Nest
+  aborts the process when such a lookup fails, so an app without the module stopped at startup. When it
+  finds nothing to read it logs that and returns 0. Its parameter types accept a Nest 12 application
+  under `strict`; they rejected `INestApplication`.
+- The Fastify, Koa, Hono and hapi adapters record a request once on Node's `http` server. Each request
+  already had the server span the SDK opens for every incoming request, and the adapter opened a second
+  one; the adapter now names that span by the route its framework matched (and by its `name` option when
+  given). On a runtime without Node's `http` server the adapter still opens its own.
+- Health and readiness probes are recorded nowhere. `init()` skipped a probe's request, but with
+  `expressMiddleware()`, `fastifyPlugin()`, `koaMiddleware()`, `honoMiddleware()`, `hapiPlugin()` or
+  `createNestjsInterceptor()` registered, a request to `/health` got the adapter's own span, and
+  `enableNestjsAutoTrace` recorded a probe route's handler, with the traced services it called, as a
+  trace on every poll; a probe route's handler now runs with tracing suppressed. A probe is decided by
+  whole path segment everywhere, as the Python SDK decides it: a last segment of `health`, `healthz`,
+  `healthcheck`, `health-check`, `health_check`, `livez`, `readyz` or `startupz`, or a health segment
+  followed only by `live`, `liveness`, `ready`, `readiness`, `startup`, `started` or `alive`, in any case.
+  `/readyz`, `/livez`, `/health/live`, `/actuator/health/readiness` and `/health?verbose=1` were recorded
+  and are skipped now; `/healthcare` and `/api/health-records` are still recorded, and
+  `/v1/orders?next=/health`, which was skipped, is recorded. Outgoing `http`, `https`, `fetch` and axios
+  requests follow the same rule.
+- `createNestjsInterceptor()` no longer fails every request with a 500. It answered Nest with a plain
+  object that had `subscribe()`, which rxjs refuses (`You provided an invalid object where a stream was
+  expected`); it now answers with an Observable of the app's own rxjs, made from the class of the one the
+  route handler returned. On Node's `http` server it records a request once, as the other adapters do:
+  the request's server span is named by the route Nest matched, and the interceptor opens no second one.
+  An error inside the interceptor passes the handler's answer through.
+- An `https.createServer()` server gets a server span for each request, as an `http` server does.
+- A LangGraph graph run outside any span (a script, a worker) is one trace. `invoke()` and `stream()`
+  open a root span named after the graph when no span is active, and steps that reach the callbacks
+  without a parent run (a graph invoked straight after an ES module app's imports runs before the SDK's
+  patches land) share one root. Each model call is recorded once: a provider call made inside a LangChain
+  chat model's run is its record, under the node it ran in and with its `langgraph.*` attributes, and the
+  callback's own `chat.generate` span is not recorded. A model run no provider call records keeps its
+  `chat.generate` span.
+- A CommonJS app gives the same spans as the same app as an ES module. OpenTelemetry instrumentations
+  that hook `require()` (and so ran only in CommonJS apps) recorded each Express middleware and route
+  handler, each socket connect and each DNS lookup, and a second span for each OpenAI call; those for
+  Express, router, connect, Koa, hapi, restify, the Nest core, net, DNS and OpenAI stay off now.
+- Outgoing `http`/`https` requests are observed without listeners of the SDK's own. A `response` listener
+  kept Node from discarding a response the app never read, which held its socket, and an `error` listener
+  swallowed a request error the app had no handler for; both now behave as without the SDK. The same holds
+  for a server response's `error` event.
+- `fetch()` given a `Request` object keeps the Request's own headers. The SDK passed headers of its own in
+  the second argument, which replace a Request's headers whole, so `Authorization` and every other header
+  of the Request were dropped. The span's method is the Request's too.
+- `client.chat.completions.create()`, `messages.create()` and the other patched calls return the provider
+  SDK's own promise again, so `.withResponse()`, `.asResponse()` and `client.beta.chat.completions.parse()`
+  work. They threw `... is not a function`, as the patch handed back a plain Promise.
+- With `captureContent: false` (or `EVALKIT_CAPTURE_CONTENT=false`), spans from other OpenTelemetry
+  instrumentation no longer carry message text. Removed now, whichever library set them:
+  `gen_ai.input.messages`, `gen_ai.output.messages` and `gen_ai.system_instructions` (the GenAI semantic
+  conventions from 1.37), `gen_ai.prompt` and `gen_ai.completion` and their indexed forms
+  (`gen_ai.prompt.0.content`), `gen_ai.tool.call.arguments` and `gen_ai.tool.call.result`,
+  `input.value`, `output.value`, `llm.input_messages.*`, `llm.output_messages.*`, `retrieval.documents.*`,
+  the Vercel AI SDK's `ai.prompt*`, `ai.response.*` and `ai.toolCall.*` content, and `mlflow.span*`, and any
+  `*.observation.input` / `*.observation.output` / `*.trace.input` / `*.trace.output`. The `content`, `message`, `body` and `parts` of `gen_ai.*` events
+  (`gen_ai.user.message`, `gen_ai.choice`, ...) go too; such an event keeps its name, role, index and
+  finish reason, and its `tool_calls` keep only the tools' names and ids. Model, tokens, cost, timing and
+  tool names stay.
+- Streamed replies record the tool calls they ask for, as replies that do not stream do: one
+  `gen_ai.tool.call` event per call with `gen_ai.tool.name`, `gen_ai.tool.call.id` and
+  `gen_ai.tool.call.arguments`, so the console shows them and session evaluation reads them. OpenAI's
+  argument fragments are assembled by index (several calls in one reply included), Anthropic's from
+  `content_block_start` and `input_json_delta`, Cohere's v1 and v2 and Bedrock InvokeModel with an
+  Anthropic model the same way, and Gemini's and Ollama's arrive whole. Streamed OpenAI and Anthropic spans
+  also carry `gen_ai.response.id`, `gen_ai.response.model` and `gen_ai.response.finish_reasons`.
+- A second `init()` applies its options to every span that starts after it: the service name,
+  environment and app version of spans the SDK's provider records, and of the spans of functions wrapped
+  before it (`traceFunction`, `@TraceMethod`, `@Traced`, NestJS auto-tracing, the framework
+  middlewares). It used to attach to the first init's provider and keep its service name. No library is
+  patched twice: a patch is recorded beside the object it patched, so it survives another library wrapping
+  it (OpenTelemetry's OpenAI instrumentation did, and a second init then recorded each OpenAI call twice),
+  and OpenTelemetry instrumentations are registered once per process. `destroy()` flushes and detaches the
+  client's own exporter and leaves the provider in place.
+- Captured function arguments and results are masked before they are cut to 4096 characters. Cut JSON no
+  longer parses, so a member such as `"api_key": "..."` in a long argument went out as written unless its
+  value looked like `sk-...` or `tk_live_...`. The scrubber also masks secret-named members of JSON that
+  arrives already cut, including one whose value the cut left unterminated, and JSON held inside a JSON
+  string.
+- The secret scrubber masks more shapes everywhere it runs: PEM private keys (whole, or cut before their
+  `END` line), Google API keys (`AIza...`), JSON Web Tokens, the userinfo of a URL or DSN written into text
+  (`postgres://user:pass@host`), and quoted assignments to a credential name (`password: "..."`,
+  `api_key='...'`). `max_tokens: "5"` and `tokens="7"` are left alone.
+- `traceFunction`, `traceTool`, `@TraceMethod`, `@Traced`, `traceObject` and `enableNestjsAutoTrace` mask
+  an argument by the parameter it is bound to: one named like a credential (`apiKey`, `secret`, `token`,
+  `password`, `credentials`, `auth`, `cookie`, `dsn`, `jwt`, `bearer`, in camel or snake case) is recorded as
+  `***`, as is a member of an options object named that way (`{ accessToken }`). A function whose own name
+  reads like a credential's (`getApiKey`, `validateToken`) records neither arguments nor result. Names are
+  read from the function's source; a destructured parameter, a bound or native function, and minified code
+  give no usable name, and their values are masked by key and shape only. `captureSecrets: true` records
+  arguments and results as given.
+- Per-token prices such as `input_cost_per_audio_token`, `input_cost_per_character_token` and
+  `output_cost_per_reasoning_token` are no longer masked as secrets. `access_token`, `refresh_token`,
+  `id_token` and `per_user_token` still are.
+- camelCase and PascalCase credential keys are masked wherever the scrubber reads a key: span and event
+  attributes, JSON bodies and attribute values (JSON cut short at `maxBodyBytes` included), quoted
+  assignments in text and URL query strings. `accessToken`, `authToken`, `refreshToken`, `idToken`,
+  `sessionToken`, `secretKey`, `apiSecret` and `userPassword` were masked only among a traced function's
+  arguments, so a JavaScript object the app logged or sent went out with its tokens. A key is split at its
+  capitals and matched as its snake_case spelling is, the Python SDK's rule. `maxTokens`, `totalTokens`,
+  `inputCostPerAudioToken`, `timeToFirstToken` and a flag about a token (`hasToken`, `isTokenValid`) keep
+  their values, and a parameter named `hasToken` is no longer masked.
+- The warning for a streamed OpenAI call without a usage chunk no longer says the call is priced at $0: the
+  trace service estimates its tokens from the prompt and completion text and marks the span
+  `evalkit.cost_estimated`, and `stream_options: { include_usage: true }` gives exact counts. With content
+  capture off there is no text to estimate from, and the warning says that instead.
+- Streamed Cohere calls are traced (`chatStream`, as `chat_stream`, and `chat` with `stream: true`), with
+  time to first token and the assembled text, on `CohereClient` and on `CohereClientV2`, whose `chat`
+  replies are read too.
+- Reasoning text stops the time-to-first-token clock on Ollama and Bedrock InvokeModel streams, as it does
+  for every other provider. Ollama streams keep their reply text, not every chunk, in
+  `gen_ai.response.body`.
+
+### Added
+- The OpenAI Responses API is traced as a model call, `responses.create`, whole and streamed, including
+  `responses.stream()` and `responses.parse()`: prompt (`instructions` and `input`), reply text, reasoning
+  summaries, tokens (cached input and reasoning tokens included), tool calls (function calls and hosted
+  tools), and time to first token. `patchOpenAIClient()` patches a client's `responses` too.
+- `generateContentStream` of `@google/generative-ai` and `@google-cloud/vertexai` is traced, named
+  `generateContentStream`, with time to first token, the reply text, tool calls and usage; the span ends
+  when the SDK's `response` settles. Their whole replies record tool calls and reasoning text, and read
+  the model, tools and sampling of the instance that made the call.
+
+### Changed
+- The SDK's own instrumentation never fails the app's call. An error inside a hook (building attributes,
+  reading a reply or a chunk, assembling tool calls) is swallowed, the call goes on as if the SDK were not
+  there, and with `debug: true` the error is logged once per place. The provider's own errors reach the
+  app unchanged, synchronous ones synchronously.
+- A streamed reply is the provider SDK's own object: an OpenAI or Anthropic `Stream` keeps `controller`,
+  `tee()` and `toReadableStream()`, and the SDKs' stream helpers (`MessageStream`, `responses.stream()`,
+  `beta.chat.completions.stream()`) work as without the SDK. A stream's span ends once, whether the app
+  reads it to the end, leaves the loop, aborts it or drops it unread (then when it is collected), and
+  the text it keeps is capped at 262,144 characters and each tool call's arguments at 32,768.
+- Every exported span carries the `environment`, `appVersion` and `deviceId` given to `init()` unless it
+  sets its own, model calls and spans of other libraries included. Only spans opened through the SDK's
+  API carried them.
+
 ## 0.3.4 — 2026-10-12
 
 ### Added

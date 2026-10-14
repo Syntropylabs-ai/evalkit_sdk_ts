@@ -44,3 +44,54 @@ export function serverRoute(req: unknown): string | undefined {
 export function clientSpanName(method: string | undefined): string {
   return (method || 'GET').toUpperCase();
 }
+
+const SERVER_SPAN = Symbol.for('evalkit.http.server_span');
+const SERVER_NAME = Symbol.for('evalkit.http.server_name');
+
+export interface ServerSpanRef {
+  span: { updateName(name: string): unknown; setAttribute(key: string, value: string): unknown };
+  ctx: unknown;
+}
+
+/** Notes on a Node request the server span the http instrumentation opened for it. */
+export function markServerSpan(req: unknown, ref: ServerSpanRef): void {
+  if (!req || typeof req !== 'object') return;
+  try {
+    Object.defineProperty(req, SERVER_SPAN, { value: ref, configurable: true });
+  } catch {
+
+  }
+}
+
+/**
+ * The server span already recording `req`, if the http instrumentation opened one. A framework adapter
+ * then names and enriches that span instead of opening a second one for the same request.
+ */
+export function serverSpanOf(req: unknown): ServerSpanRef | undefined {
+  if (!req || typeof req !== 'object') return undefined;
+  try {
+    return (req as Record<symbol, ServerSpanRef | undefined>)[SERVER_SPAN];
+  } catch {
+    return undefined;
+  }
+}
+
+/** A name an adapter's `name` option gives the request's server span, kept over the route template. */
+export function setServerName(req: unknown, name: unknown): void {
+  if (!req || typeof req !== 'object' || typeof name !== 'string' || !name) return;
+  try {
+    (req as Record<symbol, unknown>)[SERVER_NAME] = name;
+  } catch {
+
+  }
+}
+
+export function serverName(req: unknown): string | undefined {
+  if (!req || typeof req !== 'object') return undefined;
+  try {
+    const name = (req as Record<symbol, unknown>)[SERVER_NAME];
+    return typeof name === 'string' ? name : undefined;
+  } catch {
+    return undefined;
+  }
+}

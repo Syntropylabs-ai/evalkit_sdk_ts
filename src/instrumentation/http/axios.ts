@@ -3,8 +3,9 @@ import type { EvalKitClient } from '../../core/client.js';
 import { sanitizeHeaders } from '../../utils/headers.js';
 import { _evalkitAxiosSpanMap } from '../../utils/axios-span-map.js';
 import { clientSpanName } from '../../utils/http-route.js';
+import { isHealthCheck } from '../../utils/health-check.js';
 
-const SKIP_PATTERNS = [/\/v1\/ingest/, /\/health(z)?$/];
+const INGEST_RE = /\/v1\/ingest/;
 
 function safeStringify(v: any): string | undefined {
   try { return JSON.stringify(v); } catch { return undefined; }
@@ -35,7 +36,7 @@ export function patchAxios(client: EvalKitClient, axiosInstance: any): void {
 
   axiosInstance.interceptors.request.use((config: any) => {
     const url = (config.baseURL ? config.baseURL.replace(/\/$/, '') : '') + (config.url ?? '');
-    if (SKIP_PATTERNS.some((p) => p.test(url))) return config;
+    if (INGEST_RE.test(url) || isHealthCheck(url)) return config;
 
     const activeSpan = trace.getActiveSpan();
     if (!activeSpan?.isRecording()) return config;

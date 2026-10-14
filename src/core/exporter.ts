@@ -32,6 +32,14 @@ const gzipAsync = promisify(gzip);
 
 const BODY_OVERHEAD = '{"events":[]}'.length;
 
+// Resources the SDK built for its own providers. Their service name is the one of the init() that created the
+// provider; spans under them are named by the exporter's options, which belong to the init() in force.
+const sdkResources = new WeakSet<object>();
+
+export function markSdkResource(resource: object): void {
+  sdkResources.add(resource);
+}
+
 export function resolveExportGzip(explicit?: boolean): boolean {
   if (explicit !== undefined) return explicit;
   for (const name of EXPORT_GZIP_ENV_VARS) {
@@ -114,6 +122,9 @@ export class EvalKitExporter implements SpanExporter {
   private readonly url: string;
   private readonly subscriptionKey: string;
   private readonly serviceName?: string;
+  private readonly environment?: string;
+  private readonly appVersion?: string;
+  private readonly deviceId?: string;
   private readonly debug: boolean;
   private readonly captureContent: boolean;
   private readonly captureSecrets: boolean;
@@ -129,6 +140,9 @@ export class EvalKitExporter implements SpanExporter {
     baseUrl: string;
     subscriptionKey: string;
     serviceName?: string;
+    environment?: string;
+    appVersion?: string;
+    deviceId?: string;
     debug?: boolean;
     captureContent?: boolean;
     captureSecrets?: boolean;
@@ -139,6 +153,9 @@ export class EvalKitExporter implements SpanExporter {
     this.url = `${opts.baseUrl.replace(/\/$/, "")}/v1/ingest`;
     this.subscriptionKey = opts.subscriptionKey;
     this.serviceName = opts.serviceName;
+    this.environment = opts.environment || undefined;
+    this.appVersion = opts.appVersion || undefined;
+    this.deviceId = opts.deviceId || undefined;
     this.debug = opts.debug ?? false;
     this.captureContent = opts.captureContent ?? true;
     this.captureSecrets = opts.captureSecrets ?? false;
@@ -155,8 +172,9 @@ export class EvalKitExporter implements SpanExporter {
   }
 
   private serviceNameFor(span: ReadableSpan): string | undefined {
-    const fromResource = span.resource.attributes["service.name"] as string | undefined;
-    if (this.serviceName && (!fromResource || fromResource.startsWith("unknown_service"))) {
+    const fromResource = span.resource?.attributes["service.name"] as string | undefined;
+    const sdkOwned = !!span.resource && sdkResources.has(span.resource);
+    if (this.serviceName && (sdkOwned || !fromResource || fromResource.startsWith("unknown_service"))) {
       return this.serviceName;
     }
     return fromResource;
@@ -383,13 +401,15 @@ export class EvalKitExporter implements SpanExporter {
       events: events.length > 0 ? events : undefined,
       attributes: { ...framework?.attributes, ...buildAttributes(attrs), ...agentAttributes(agentName) },
       createdAt: new Date(startMs).toISOString(),
-      environment: attrs["evalkit.environment"] as string | undefined,
-      appVersion: attrs["evalkit.app_version"] as string | undefined,
+      // Every span the process exports belongs to the deployment init() named, model calls and spans of
+      // other libraries included, not only the ones opened through the SDK's API.
+      environment: (attrs["evalkit.environment"] as string | undefined) ?? this.environment,
+      appVersion: (attrs["evalkit.app_version"] as string | undefined) ?? this.appVersion,
       // A span's own attribute, in any spelling, wins: one written by hand with `session.id` (the
       // OpenTelemetry key) has to group into a session exactly like one written through setUser().
       userId: userIdOf(attrs) ?? scope.userId,
       sessionId: sessionIdOf(attrs) ?? scope.sessionId,
-      deviceId: (attrs["evalkit.device_id"] as string | undefined) ?? scope.deviceId,
+      deviceId: (attrs["evalkit.device_id"] as string | undefined) ?? scope.deviceId ?? this.deviceId,
       agentName,
       sdkVersion: (attrs["evalkit.sdk_version"] as string | undefined) ?? evalkitScopeVersion(span),
     };

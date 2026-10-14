@@ -21,6 +21,8 @@ import {
   streamException,
   teeAsyncIterable,
 } from "./_stream.js";
+import { claimPatch } from "../../_patched.js";
+import { claimFrameworkModelRun } from '../../../core/framework-model-call.js';
 
 export { patchBedrockAgentRuntime } from "./_agent.js";
 
@@ -405,6 +407,7 @@ export function patchBedrock(
 ): void {
   if (typeof bedrockClient?.send !== 'function') return;
   if ((bedrockClient.send as any).__evalkit) return;
+  if (!claimPatch(bedrockClient, "send")) return;
 
   captureResponseHeaders(bedrockClient);
 
@@ -424,11 +427,13 @@ export function patchBedrock(
       const input = command.input ?? {};
       modelId = typeof input.modelId === 'string' && input.modelId ? input.modelId : 'unknown';
       family = detectFamily(modelId);
-      const ctx = parentCtx ?? otelContext.active();
+      const framework = claimFrameworkModelRun();
+      const ctx = parentCtx ?? framework?.ctx ?? otelContext.active();
       span =
         entry.op === 'converse' || entry.op === 'converse_stream'
           ? startConverseSpan(client, entry.span, input as ConverseInput, modelId, ctx)
           : startInvokeModelSpan(client, entry.span, input as InvokeModelInput, modelId, family, ctx);
+      if (framework) span.setAttributes(framework.attributes);
       spanCtx = trace.setSpan(ctx, span);
     } catch {
       return original.apply(this, args);

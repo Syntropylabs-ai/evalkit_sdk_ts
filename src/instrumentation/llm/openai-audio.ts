@@ -1,6 +1,7 @@
 import { SpanKind, SpanStatusCode, context as otelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody } from "./_body.js";
+import { claimPatch } from "../_patched.js";
 
 function startAudioSpan(client: EvalKitClient, operation: string, model: string, prompt: string, reqBody?: string) {
   const attrs: Record<string, any> = { "evalkit.span_type": "llm_call", "gen_ai.system": "openai" };
@@ -26,6 +27,7 @@ function startAudioSpan(client: EvalKitClient, operation: string, model: string,
 
 function patchSpeech(client: EvalKitClient, Speech: any): void {
   if (typeof Speech?.prototype?.create !== "function" || Speech.prototype.create.__evalkit) return;
+  if (!claimPatch(Speech.prototype, "create")) return;
   const original = Speech.prototype.create;
 
   async function traced(this: any, body: any = {}, ...rest: any[]) {
@@ -73,6 +75,7 @@ function transcriptionText(response: any): string {
 
 function patchTranscribe(client: EvalKitClient, Cls: any, operation: string): void {
   if (typeof Cls?.prototype?.create !== "function" || Cls.prototype.create.__evalkit) return;
+  if (!claimPatch(Cls.prototype, "create")) return;
   const original = Cls.prototype.create;
 
   async function traced(this: any, body: any = {}, ...rest: any[]) {

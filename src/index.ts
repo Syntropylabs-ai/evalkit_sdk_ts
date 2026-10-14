@@ -16,6 +16,7 @@ import {
 import type { Identity, SessionScope } from "./core/identity.js";
 import { extractTraceparent as _extractTraceparentHelper } from "./core/context.js";
 import { patchOpenAI } from "./instrumentation/llm/openai/index.js";
+import { patchOpenAIResponses } from "./instrumentation/llm/openai/responses.js";
 import { patchAnthropic } from "./instrumentation/llm/anthropic/index.js";
 import { patchMongoose as _patchMongoose } from "./instrumentation/db/mongoose.js";
 import { patchRedis as _patchRedis } from "./instrumentation/db/redis.js";
@@ -83,165 +84,182 @@ function getInstance(): EvalKitClient {
   return _instance;
 }
 
+// What every patch and traced wrapper holds instead of a client. A library is patched once per process and a
+// wrapper outlives the init() that made it, while a later init() replaces the client, so each call reaches
+// the client in force through this handle. Methods run with the handle as `this`, which keeps a wrapper made
+// through it resolving the client on every call too.
+const _current: EvalKitClient = new Proxy(Object.create(EvalKitClient.prototype) as EvalKitClient, {
+  get(_target, prop) {
+    return Reflect.get(getInstance(), prop);
+  },
+});
+
+function live(): EvalKitClient {
+  getInstance();
+  return _current;
+}
+
 export function init(opts: EvalKitOptions): EvalKitClient {
-  if (_instance) _instance.destroy();
+  if (_instance) void _instance.destroy();
   _instance = new EvalKitClient(opts);
-  setupAutoInstrumentation(_instance);
+  setupAutoInstrumentation(_current);
   return _instance;
 }
 
 export function patchOpenAIClient(openaiInstance: any, parentCtx?: OtelContext): void {
-  patchOpenAI(getInstance(), openaiInstance.chat.completions, parentCtx);
+  const client = live();
+  patchOpenAI(client, openaiInstance?.chat?.completions, parentCtx);
+  patchOpenAIResponses(client, openaiInstance?.responses);
 }
 
 export function patchAnthropicClient(anthropicInstance: any, parentCtx?: OtelContext): void {
-  patchAnthropic(getInstance(), anthropicInstance.messages, parentCtx);
+  patchAnthropic(live(), anthropicInstance?.messages, parentCtx);
 }
 
 export function patchBedrockClient(bedrockRuntimeClient: any): void {
-  _patchBedrock(getInstance(), bedrockRuntimeClient);
+  _patchBedrock(live(), bedrockRuntimeClient);
 }
 
 export function patchBedrockAgentRuntimeClient(bedrockAgentRuntimeClient: any): void {
-  _patchBedrockAgentRuntime(getInstance(), bedrockAgentRuntimeClient);
+  _patchBedrockAgentRuntime(live(), bedrockAgentRuntimeClient);
 }
 
 export function patchAnthropicVertexClient(anthropicVertexInstance: any): void {
-  _patchAnthropicVertex(getInstance(), anthropicVertexInstance.messages);
+  _patchAnthropicVertex(live(), anthropicVertexInstance?.messages);
 }
 
 export function patchVertexGenerativeModel(model: any): void {
-  _patchVertexGenerativeModel(getInstance(), model);
+  _patchVertexGenerativeModel(live(), model);
 }
 
 export function patchCohereClient(cohereClient: any): void {
-  _patchCohere(getInstance(), cohereClient);
+  _patchCohere(live(), cohereClient);
 }
 
 export function patchGoogleAIModel(model: any): void {
-  _patchGoogleAI(getInstance(), model);
+  _patchGoogleAI(live(), model);
 }
 
 export function patchGoogleGenAIModels(modelsProto: any): void {
-  _patchGoogleGenAI(getInstance(), modelsProto);
+  _patchGoogleGenAI(live(), modelsProto);
 }
 
 export function langchainHandler(): Promise<any | null> {
-  return _langchainCallbackHandler(getInstance());
+  return _langchainCallbackHandler(live());
 }
 
 export function patchMongooseClient(mongoose: any): void {
-  _patchMongoose(getInstance(), mongoose);
+  _patchMongoose(live(), mongoose);
 }
 
 export function patchRedisClient(redisInstance: any): void {
-  _patchRedis(getInstance(), redisInstance);
+  _patchRedis(live(), redisInstance);
 }
 
 export function patchAxiosClient(axiosInstance: any): void {
-  _patchAxios(getInstance(), axiosInstance);
+  _patchAxios(live(), axiosInstance);
 }
 
 export function patchPgClient(pgInstance: any): void {
-  _patchPg(getInstance(), pgInstance);
+  _patchPg(live(), pgInstance);
 }
 
 export function patchMysql2Client(mysqlInstance: any): void {
-  _patchMysql2(getInstance(), mysqlInstance);
+  _patchMysql2(live(), mysqlInstance);
 }
 
 export function patchMCPClient(mcpClientClassOrInstance: any): void {
-  _patchMcp(getInstance(), mcpClientClassOrInstance);
+  _patchMcp(live(), mcpClientClassOrInstance);
 }
 
 export function patchOllamaClient(OllamaClass: any): void {
-  _patchOllama(getInstance(), OllamaClass);
+  _patchOllama(live(), OllamaClass);
 }
 
 export function patchPineconeClient(IndexClass: any): void {
-  _patchPineconeIndex(getInstance(), IndexClass);
+  _patchPineconeIndex(live(), IndexClass);
 }
 
 export function patchQdrantClient(QdrantClientClass: any): void {
-  _patchQdrantClient(getInstance(), QdrantClientClass);
+  _patchQdrantClient(live(), QdrantClientClass);
 }
 
 export function patchChromaClient(chromadbModule: any): void {
-  _patchChromaCollection(getInstance(), chromadbModule);
+  _patchChromaCollection(live(), chromadbModule);
 }
 
 export function patchWeaviateClient(weaviateClientModule: any): void {
-  _patchWeaviateModule(getInstance(), weaviateClientModule);
+  _patchWeaviateModule(live(), weaviateClientModule);
 }
 
 export function patchWeaviateClientInstance<T = any>(weaviateClient: T): T {
-  return _patchWeaviateClientInstance(getInstance(), weaviateClient);
+  return _patchWeaviateClientInstance(live(), weaviateClient);
 }
 
 export function patchLlamaIndexClient(llamaindexModule: any): void {
-  _patchLlamaIndex(getInstance(), llamaindexModule);
+  _patchLlamaIndex(live(), llamaindexModule);
 }
 
 export function patchOpenAIAudioClient(OpenAIClass: any): void {
-  _patchOpenAIAudio(getInstance(), OpenAIClass);
+  _patchOpenAIAudio(live(), OpenAIClass);
 }
 
 export function patchElevenLabsClientInstance<T = any>(elevenLabsClient: T): T {
-  return _patchElevenLabsClientInstance(getInstance(), elevenLabsClient);
+  return _patchElevenLabsClientInstance(live(), elevenLabsClient);
 }
 
 export function patchAssemblyAIClient(TranscriptService: any): void {
-  _patchAssemblyAI(getInstance(), TranscriptService);
+  _patchAssemblyAI(live(), TranscriptService);
 }
 
 export function instrumentPrisma<T = any>(prisma: T, opts?: { system?: string }): T {
-  return _instrumentPrisma(getInstance(), prisma, opts) as T;
+  return _instrumentPrisma(live(), prisma, opts) as T;
 }
 
 export function traceLive(ai: any, params: any, opts?: { sessionId?: string; userId?: string }): Promise<any> {
-  return _traceLive(getInstance(), ai, params, opts);
+  return _traceLive(live(), ai, params, opts);
 }
 
 export function traceOpenAIRealtime(rt: any, opts?: { model?: string; sessionId?: string; userId?: string }): any {
-  return _traceOpenAIRealtime(getInstance(), rt, opts);
+  return _traceOpenAIRealtime(live(), rt, opts);
 }
 
 export function patchOpenAIRealtimeClass(RealtimeClass: any): void {
-  _patchOpenAIRealtime(getInstance(), RealtimeClass);
+  _patchOpenAIRealtime(live(), RealtimeClass);
 }
 
 export function expressMiddleware(
   options?: import("./frameworks/express/middleware.js").ExpressMiddlewareOptions,
 ): (req: any, res: any, next: any) => void {
-  return createExpressMiddleware(getInstance(), options);
+  return createExpressMiddleware(live(), options);
 }
 
 export function fastifyPlugin(
   options?: import("./frameworks/fastify/plugin.js").FastifyPluginOptions,
 ): ReturnType<typeof createFastifyPlugin> {
-  return createFastifyPlugin(getInstance(), options, _extractTraceparent);
+  return createFastifyPlugin(live(), options, _extractTraceparent);
 }
 
 export function koaMiddleware(
   options?: import("./frameworks/koa/middleware.js").KoaMiddlewareOptions,
 ): (ctx: any, next: () => Promise<void>) => Promise<void> {
-  return createKoaMiddleware(getInstance(), options);
+  return createKoaMiddleware(live(), options);
 }
 
 export function honoMiddleware(
   options?: import("./frameworks/hono/middleware.js").HonoMiddlewareOptions,
 ): (c: any, next: () => Promise<void>) => Promise<void> {
-  return createHonoMiddleware(getInstance(), options);
+  return createHonoMiddleware(live(), options);
 }
 
 export function hapiPlugin(
   options?: import("./frameworks/hapi/plugin.js").HapiPluginOptions,
 ): ReturnType<typeof createHapiPlugin> {
-  return createHapiPlugin(getInstance(), options);
+  return createHapiPlugin(live(), options);
 }
 
 export function createNestjsInterceptor(): EvalKitInterceptor {
-  return new EvalKitInterceptor(getInstance());
+  return new EvalKitInterceptor(live());
 }
 
 export function startTrace(
@@ -273,8 +291,18 @@ export function withSession<T>(session: SessionScope, fn: () => T): T {
   return _withSession(session, fn);
 }
 
-export async function flush(): Promise<void> {
-  return getInstance().flush();
+/**
+ * Sends every span ended so far; resolves to false, never rejects, when the export failed. Before init() there
+ * is nothing to send and it resolves to false: an app awaits flush() on its way out, often from a module that
+ * cannot tell whether tracing was set up (init() guarded on a key that is unset in tests), and tracing must
+ * not fail it there.
+ */
+export async function flush(): Promise<boolean> {
+  try {
+    return _instance ? await _instance.flush() : false;
+  } catch {
+    return false;
+  }
 }
 
 export function startHttpTrace(
@@ -303,7 +331,7 @@ export function traceFunction<T extends (...args: any[]) => any>(
   attributes?: Record<string, string | number | boolean>,
   captureIO: boolean = true,
 ): T {
-  return getInstance().traceFunction(name, fn, attributes, captureIO);
+  return live().traceFunction(name, fn, attributes, captureIO);
 }
 
 export function traceTool<T extends (...args: any[]) => any>(
@@ -312,7 +340,7 @@ export function traceTool<T extends (...args: any[]) => any>(
   attributes?: Record<string, string | number | boolean>,
   captureIO: boolean = true,
 ): T {
-  return getInstance().traceTool(name, fn, attributes, captureIO);
+  return live().traceTool(name, fn, attributes, captureIO);
 }
 
 export function TraceMethod(name?: string): MethodDecorator {
@@ -321,7 +349,7 @@ export function TraceMethod(name?: string): MethodDecorator {
     const spanName = name ?? `${(target as any).constructor?.name ?? 'unknown'}.${String(key)}`;
     let cached: ((...a: any[]) => any) | undefined;
     descriptor.value = function (this: any, ...args: any[]) {
-      if (!cached) cached = getInstance().traceFunction(spanName, original);
+      if (!cached) cached = live().traceFunction(spanName, original);
       return cached!.apply(this, args);
     };
     return descriptor;
@@ -342,7 +370,7 @@ export function Traced(options?: { prefix?: string }): ClassDecorator {
       Object.defineProperty(proto, key, {
         ...desc,
         value: function (this: any, ...args: any[]) {
-          if (!cached) cached = getInstance().traceFunction(spanName, original);
+          if (!cached) cached = live().traceFunction(spanName, original);
           return cached.apply(this, args);
         },
       });
@@ -355,7 +383,7 @@ export function traceObject<T extends Record<string, any>>(
   obj: T,
   options?: { prefix?: string; captureIO?: boolean },
 ): T {
-  const inst = getInstance();
+  const inst = live();
   const prefix = options?.prefix;
   const captureIO = options?.captureIO ?? true;
   for (const key of Object.keys(obj)) {
@@ -370,34 +398,61 @@ export function traceObject<T extends Record<string, any>>(
   return obj;
 }
 
-type DiscoveryService = {
-  getProviders: () => Array<{ instance?: unknown }>;
-  getControllers: () => Array<{ instance?: unknown }>;
-};
+/** What `enableNestjsAutoTrace` reads providers and controllers from: Nest's DiscoveryService. */
+export interface NestDiscoveryLike {
+  getProviders(...args: any[]): Array<{ instance?: unknown }>;
+  getControllers(...args: any[]): Array<{ instance?: unknown }>;
+}
 
+/** A Nest application or application context: anything with Nest's `get()`. */
+export interface NestApplicationLike {
+  get(typeOrToken: any, options?: any): any;
+}
+
+type NestModuleLike = { providers?: Map<unknown, { instance?: unknown }>; controllers?: Map<unknown, { instance?: unknown }> };
+
+/**
+ * The providers and controllers of every module in a Nest application, read from its container. Looking up
+ * Nest's DiscoveryService through `app.get()` needs DiscoveryModule imported, and a failed lookup through
+ * the application aborts the process, so the container the application already holds is read instead.
+ */
+function nestDiscoveryOf(app: unknown): NestDiscoveryLike | undefined {
+  const container = (app as { container?: { getModules?: () => Map<unknown, NestModuleLike> } } | undefined)?.container;
+  if (!container || typeof container.getModules !== 'function') return undefined;
+  const wrappers = (key: 'providers' | 'controllers') => (): Array<{ instance?: unknown }> => {
+    const out: Array<{ instance?: unknown }> = [];
+    for (const module of container.getModules!().values()) {
+      for (const wrapper of module?.[key]?.values() ?? []) out.push(wrapper);
+    }
+    return out;
+  };
+  return { getProviders: wrappers('providers'), getControllers: wrappers('controllers') };
+}
+
+/**
+ * Wraps the methods of a Nest application's controllers and services in function spans. Takes the
+ * application itself, or a DiscoveryService. No module has to be imported for it; when it finds nothing to
+ * read it logs that and returns 0, and it never fails the application's startup.
+ */
 export async function enableNestjsAutoTrace(
-  appOrDiscovery: DiscoveryService | { get: (token: unknown) => unknown },
+  appOrDiscovery: NestApplicationLike | NestDiscoveryLike,
   options?: { include?: RegExp; captureIO?: boolean },
 ): Promise<number> {
-  let discovery: DiscoveryService | undefined;
-  const candidate = appOrDiscovery as Partial<DiscoveryService> & { get?: (token: unknown) => unknown };
-  if (typeof candidate.getProviders === 'function' && typeof candidate.getControllers === 'function') {
-    discovery = appOrDiscovery as DiscoveryService;
-  } else if (typeof candidate.get === 'function') {
-
-    try {
-
-      const nestCoreSpecifier = '@nestjs/core';
-      const nestCore = (await import(nestCoreSpecifier)) as { DiscoveryService?: unknown };
-      if (nestCore.DiscoveryService) {
-        discovery = candidate.get(nestCore.DiscoveryService) as DiscoveryService;
-      }
-    } catch (e) {
-      console.warn('[evalkit] enableNestjsAutoTrace: could not resolve DiscoveryService:', (e as Error)?.message);
+  try {
+    const client = live();
+    const candidate = appOrDiscovery as Partial<NestDiscoveryLike>;
+    const discovery = typeof candidate?.getProviders === 'function' && typeof candidate?.getControllers === 'function'
+      ? (appOrDiscovery as NestDiscoveryLike)
+      : nestDiscoveryOf(appOrDiscovery);
+    if (!discovery) {
+      console.warn('[evalkit] enableNestjsAutoTrace: pass the Nest application or its DiscoveryService; nothing was traced');
+      return 0;
     }
+    return _autoTraceNest(client, discovery, options);
+  } catch (e) {
+    console.warn('[evalkit] enableNestjsAutoTrace: skipped:', (e as Error)?.message);
+    return 0;
   }
-  if (!discovery) return 0;
-  return _autoTraceNest(getInstance(), discovery, options);
 }
 
 export function withTrace<T>(ctx: OtelContext, fn: () => Promise<T>): Promise<T> {

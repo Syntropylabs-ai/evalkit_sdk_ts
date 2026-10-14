@@ -142,6 +142,16 @@ try {
     /include_usage/,
     'the warning must name the exact field to add, not just the option object'
   );
+  assert.match(
+    warnings[0],
+    /evalkit\.cost_estimated/,
+    'the trace service estimates the tokens of such a call and marks the span, so the warning must say so'
+  );
+  assert.doesNotMatch(
+    warnings[0],
+    /\$0/,
+    'a call the trace service estimates is not priced at $0; saying so sends people after a cost bug that is not there'
+  );
 
   await drain({ ...STREAM_REQ }, [delta('Hi')]);
   assert.strictEqual(

@@ -1,9 +1,11 @@
 import { trace, context as otelContext, SpanKind, SpanStatusCode } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
+import { claimPatch } from '../_patched.js';
 
 export function patchMysql2(client: EvalKitClient, mysqlInstance: any): void {
   const proto = mysqlInstance?.prototype ?? Object.getPrototypeOf(mysqlInstance);
   if (!proto || proto.__evalkit_mysql2) return;
+  if (!claimPatch(proto, 'query')) return;
 
   for (const method of ['query', 'execute'] as const) {
     const orig = proto[method];

@@ -1,7 +1,8 @@
 import { context as otelContext, trace } from '@opentelemetry/api';
 import type { Context as OtelContext } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
-import { setServerRoute } from '../../utils/http-route.js';
+import { serverSpanOf, setServerName, setServerRoute } from '../../utils/http-route.js';
+import { isHealthCheck } from '../../utils/health-check.js';
 
 export interface FastifyPluginOptions {
   name?: string | ((request: any) => string);
@@ -24,6 +25,11 @@ export function createFastifyPlugin(
     fastify.addHook(
       'onRequest',
       (request: any, _reply: any, hookDone: () => void) => {
+        // A health probe is not recorded, as the http server's own instrumentation does not record it.
+        if (isHealthCheck(request.url)) {
+          hookDone();
+          return;
+        }
         const routePath =
           request.routerPath ??
           request.routeOptions?.url ??
@@ -35,6 +41,16 @@ export function createFastifyPlugin(
             ? resolvedOpts.name(request)
             : (resolvedOpts.name ??
               `${String(request.method ?? 'GET')} ${String(routePath)}`);
+
+        // On Node's http server the request already has its server span; the plugin names that one rather
+        // than recording the request a second time.
+        const core = serverSpanOf(request.raw);
+        if (core) {
+          if (resolvedOpts.name !== undefined) setServerName(request.raw, traceName);
+          request._evalkitCtx = core.ctx;
+          otelContext.with(core.ctx as OtelContext, hookDone);
+          return;
+        }
 
         const traceparentHeader = request.headers?.['traceparent'] as string | undefined;
         const parentCtx = extractTraceparent

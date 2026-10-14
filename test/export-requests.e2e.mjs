@@ -78,12 +78,8 @@ async function exportSpans(client, spans) {
     if (payload) attributes['test.payload'] = 'x'.repeat(payload);
     client.tracer.startSpan(name, { attributes }).end();
   }
-  try {
-    await client.flush();
-    return true;
-  } catch {
-    return false;
-  }
+  // flush() resolves to whether the export succeeded; it never rejects.
+  return client.flush();
 }
 
 async function waitFor(predicate, what) {

@@ -1,9 +1,11 @@
 import { trace, context as otelContext, SpanKind, SpanStatusCode } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
+import { claimPatch } from '../_patched.js';
 
 export function patchMongoose(client: EvalKitClient, mongoose: any): void {
   const QueryProto = mongoose.Query?.prototype;
   if (!QueryProto || QueryProto.__evalkit) return;
+  if (!claimPatch(QueryProto, 'exec')) return;
 
   const origExec = QueryProto.exec;
 

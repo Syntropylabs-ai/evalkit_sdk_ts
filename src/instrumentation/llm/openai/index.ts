@@ -1,10 +1,16 @@
-import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opentelemetry/api";
+import { SpanKind, context as otelContext, trace } from "@opentelemetry/api";
 import type { Span, Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
+import { guarded, swallow } from "../../../core/guard.js";
+import { claimPatch } from "../../_patched.js";
 import { emitToolCalls, fromOpenAIChat } from "../_toolcalls.js";
 import { safeBody } from "../_body.js";
 import { toolAttrs } from "../_request.js";
+import { observeCall } from "../_api-promise.js";
+import { FirstToken, StreamText, StreamToolCalls, observeStream } from "../_stream.js";
+import { endSpan, setAttributes } from "../_span.js";
 import { messageContentText } from "../../../core/message-content.js";
+import { claimFrameworkModelRun } from "../../../core/framework-model-call.js";
 
 type Messages = Array<{ role: string; content: unknown }>;
 type ToolCall = {
@@ -38,102 +44,146 @@ type CreateParams = {
   stream_options?: { include_usage?: boolean } | null;
   tools?: unknown[];
 };
-type Completions = { create: (...args: unknown[]) => Promise<unknown> };
+type Completions = { create: (...args: unknown[]) => unknown };
 
 let warnedMissingStreamUsage = false;
 
-function warnMissingStreamUsage(): void {
+function warnMissingStreamUsage(contentCaptured: boolean): void {
   if (warnedMissingStreamUsage) return;
   warnedMissingStreamUsage = true;
+  const estimate = contentCaptured
+    ? 'the trace service estimates its tokens from the prompt and completion text (about four characters a ' +
+      'token) and marks the span evalkit.cost_estimated'
+    : 'with content capture off there is no text to estimate its tokens from, so the call is recorded with no ' +
+      'tokens and no cost';
   try {
     console.warn(
-      '[evalkit] a streamed OpenAI chat completion ended without a usage chunk, so this span reports 0 input and ' +
-        '0 output tokens and every cost report prices the call at $0 - the OpenAI API only sends the final usage ' +
-        'chunk when the request sets stream_options: { include_usage: true }; add it to your ' +
-        'chat.completions.create({ ... }) call to get real token counts for streamed calls (warned once per process)'
+      `[evalkit] a streamed OpenAI chat completion ended without a usage chunk, so ${estimate}. The OpenAI API ` +
+        'sends the usage chunk only when the request sets stream_options: { include_usage: true }; add it to ' +
+        'your chat.completions.create({ ... }) call for exact token counts (warned once per process)'
     );
   } catch {  }
 }
 
-function wrapOpenAIStream(stream: any, span: Span, startMs: number = Date.now(), warnOnZeroUsage: boolean = false): any {
-  let content = '';
+function recordChatStream(
+  client: EvalKitClient,
+  stream: unknown,
+  span: Span,
+  startMs: number,
+  warnOnZeroUsage: boolean,
+): unknown {
+  const text = new StreamText();
+  const tools = new StreamToolCalls();
+  const first = new FirstToken(startMs);
+  const finishReasons: string[] = [];
   let tokensIn = 0;
   let tokensOut = 0;
   let reasoningTokens = 0;
   let cacheReadTokens = 0;
-  let ttftMs: number | undefined;
-  let finished = false;
+  let responseId = '';
+  let responseModel = '';
 
-  function finish(error?: Error) {
-    if (finished) return;
-    finished = true;
-    if (warnOnZeroUsage && !error && !tokensIn && !tokensOut) warnMissingStreamUsage();
-    span.setAttributes({
-      'evalkit.completion': content,
+  const onChunk = (chunk: any): void => {
+    for (const choice of chunk?.choices ?? []) {
+      const index = typeof choice?.index === 'number' ? choice.index : 0;
+      const delta = choice?.delta;
+      if (delta) {
+        if (index === 0 && text.append(delta.content)) first.mark();
+        if (typeof delta.refusal === 'string' && delta.refusal) first.mark();
+        for (const call of delta.tool_calls ?? []) {
+          const entry = tools.entry(`${index}:${call?.index ?? 0}`);
+          tools.describe(entry, call?.function?.name, call?.id);
+          tools.appendArguments(entry, call?.function?.arguments);
+        }
+        if (delta.function_call) {
+          const entry = tools.entry(`${index}:function_call`);
+          tools.describe(entry, delta.function_call.name);
+          tools.appendArguments(entry, delta.function_call.arguments);
+        }
+      }
+      const reason = choice?.finish_reason;
+      if (typeof reason === 'string' && reason && !finishReasons.includes(reason)) finishReasons.push(reason);
+    }
+    if (typeof chunk?.id === 'string' && chunk.id) responseId = chunk.id;
+    if (typeof chunk?.model === 'string' && chunk.model) responseModel = chunk.model;
+    if (chunk?.usage) {
+      tokensIn = chunk.usage.prompt_tokens ?? 0;
+      tokensOut = chunk.usage.completion_tokens ?? 0;
+      reasoningTokens = chunk.usage.completion_tokens_details?.reasoning_tokens ?? 0;
+      cacheReadTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
+    }
+  };
+
+  const onEnd = (error?: Error): void => {
+    if (warnOnZeroUsage && !error && !tokensIn && !tokensOut) {
+      guarded('warning about stream usage', () => warnMissingStreamUsage(client.options.captureContent !== false), undefined);
+    }
+    const completion = text.toString();
+    setAttributes(span, () => ({
+      'evalkit.completion': completion,
       'gen_ai.usage.input_tokens': tokensIn,
       'gen_ai.usage.output_tokens': tokensOut,
       'gen_ai.streaming': true,
+      ...(responseModel && { 'gen_ai.response.model': responseModel }),
+      ...(responseId && { 'gen_ai.response.id': responseId }),
+      ...(finishReasons.length > 0 && { 'gen_ai.response.finish_reasons': finishReasons }),
       ...(reasoningTokens && { 'gen_ai.usage.reasoning_tokens': reasoningTokens }),
       ...(cacheReadTokens > 0 && { 'gen_ai.usage.cache_read_tokens': cacheReadTokens }),
-      ...(!error && ttftMs !== undefined && { 'gen_ai.server.time_to_first_token_ms': ttftMs }),
-    });
-    const body = safeBody({ text: content });
-    if (body) span.setAttribute('gen_ai.response.body', body);
-    if (error) {
-      span.recordException(error);
-      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-    } else {
-      span.setStatus({ code: SpanStatusCode.OK });
-    }
-    span.end();
-  }
+      ...first.attributes(error),
+      'gen_ai.response.body': safeBody({ text: completion }),
+    }), 'recording a streamed OpenAI reply');
+    guarded('recording streamed tool calls', () => emitToolCalls(client, span, tools.calls()), undefined);
+    endSpan(span, error);
+  };
 
-  return new Proxy(stream, {
-    get(target: any, prop: string | symbol, receiver: any) {
-      if (prop === Symbol.asyncIterator) {
-        return function () {
-          const iter = target[Symbol.asyncIterator]();
-          return {
-            async next() {
-              try {
-                const result = await iter.next();
-                if (!result.done && result.value) {
-                  const chunk = result.value;
-                  const delta = chunk.choices?.[0]?.delta?.content;
-                  if (delta) {
-                    if (ttftMs === undefined) ttftMs = Date.now() - startMs;
-                    content += delta;
-                  }
-                  if (chunk.usage) {
-                    tokensIn = chunk.usage.prompt_tokens ?? 0;
-                    tokensOut = chunk.usage.completion_tokens ?? 0;
-                    reasoningTokens = chunk.usage.completion_tokens_details?.reasoning_tokens ?? 0;
-                    cacheReadTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? 0;
-                  }
-                }
-                if (result.done) finish();
-                return result;
-              } catch (err: any) {
-                finish(err instanceof Error ? err : new Error(String(err)));
-                throw err;
-              }
-            },
-            return() {
-              finish();
-              return iter.return?.() ?? Promise.resolve({ done: true, value: undefined });
-            },
-            throw(err?: any) {
-              finish(err instanceof Error ? err : new Error(String(err)));
-              return iter.throw?.(err) ?? Promise.reject(err);
-            },
-            [Symbol.asyncIterator]() { return this; },
-          };
-        };
-      }
-      const val = Reflect.get(target, prop, receiver);
-      return typeof val === 'function' ? val.bind(target) : val;
+  return observeStream(stream, onChunk, onEnd);
+}
+
+function recordChatResult(client: EvalKitClient, result: ChatCompletion, span: Span): ChatCompletion {
+  setAttributes(span, () => {
+    const choice = result.choices?.[0];
+    const reasoningTokens = result.usage?.completion_tokens_details?.reasoning_tokens ?? 0;
+    const cacheReadTokens = result.usage?.prompt_tokens_details?.cached_tokens ?? 0;
+    return {
+      "gen_ai.response.model": result.model,
+      "gen_ai.response.id": result.id,
+      "gen_ai.usage.input_tokens": result.usage?.prompt_tokens ?? 0,
+      "gen_ai.usage.output_tokens": result.usage?.completion_tokens ?? 0,
+      "gen_ai.usage.total_tokens": result.usage?.total_tokens ?? 0,
+      "gen_ai.response.finish_reasons": choice?.finish_reason ? [choice.finish_reason] : [],
+      "evalkit.completion": choice?.message?.content ?? "",
+      ...(reasoningTokens && { "gen_ai.usage.reasoning_tokens": reasoningTokens }),
+      ...(cacheReadTokens && { "gen_ai.usage.cache_read_tokens": cacheReadTokens }),
+      "gen_ai.response.body": safeBody(result),
+    };
+  }, "recording an OpenAI reply");
+  guarded("recording tool calls", () => emitToolCalls(client, span, fromOpenAIChat(result)), undefined);
+  endSpan(span);
+  return result;
+}
+
+function startChatSpan(client: EvalKitClient, params: CreateParams, ctx: OtelContext, system: string): Span {
+  const span = client.tracer.startSpan(
+    "chat.completions.create",
+    {
+      kind: SpanKind.CLIENT,
+      attributes: {
+        "evalkit.span_type": "llm_call",
+        "gen_ai.system": system,
+        "gen_ai.request.model": params.model ?? "unknown",
+      },
     },
-  });
+    ctx
+  );
+  setAttributes(span, () => ({
+    ...(params.temperature != null && { "gen_ai.request.temperature": params.temperature }),
+    ...(params.max_tokens != null && { "gen_ai.request.max_tokens": params.max_tokens }),
+    ...(params.top_p != null && { "gen_ai.request.top_p": params.top_p }),
+    ...toolAttrs(params.tools),
+    "evalkit.prompt": messagesToText(params.messages ?? []),
+    "gen_ai.request.body": safeBody(params),
+  }), "recording an OpenAI request");
+  return span;
 }
 
 export function patchOpenAI(
@@ -142,92 +192,46 @@ export function patchOpenAI(
   parentCtx?: OtelContext,
   system: string = "openai"
 ): void {
+  if (!completions || typeof completions.create !== "function") return;
   if ((completions.create as { __evalkit?: boolean }).__evalkit) return;
+  if (!claimPatch(completions, "create")) return;
 
   const original = completions.create;
 
-  completions.create = async function (this: unknown, ...args: unknown[]): Promise<unknown> {
-    const params = args[0] as CreateParams;
-    const ctx = parentCtx ?? otelContext.active();
+  const traced = function (this: unknown, ...args: unknown[]): unknown {
+    const started = guarded("starting an OpenAI chat span", () => {
+      const params = (args[0] ?? {}) as CreateParams;
+      // Inside a framework's model run, the call takes that run's place.
+      const framework = claimFrameworkModelRun();
+      const ctx = parentCtx ?? framework?.ctx ?? otelContext.active();
+      const span = startChatSpan(client, params, ctx, system);
+      if (framework) span.setAttributes(framework.attributes);
+      return {
+        span,
+        ctx: trace.setSpan(ctx, span),
+        stream: !!params.stream,
+        warnOnZeroUsage: system === "openai" && !params.stream_options?.include_usage,
+        startMs: Date.now(),
+      };
+    }, undefined);
+    if (!started) return original.apply(this, args);
 
-    const span = client.tracer.startSpan(
-      "chat.completions.create",
-      {
-        kind: SpanKind.CLIENT,
-        attributes: {
-          "evalkit.span_type": "llm_call",
-          "gen_ai.system": system,
-          "gen_ai.request.model": params.model ?? "unknown",
-          ...(params.temperature != null && { "gen_ai.request.temperature": params.temperature }),
-          ...(params.max_tokens != null && { "gen_ai.request.max_tokens": params.max_tokens }),
-          ...(params.top_p != null && { "gen_ai.request.top_p": params.top_p }),
-          ...toolAttrs(params.tools),
-          "evalkit.prompt": messagesToText(params.messages ?? []),
-        },
-      },
-      ctx
+    const { span } = started;
+    return observeCall(
+      () => otelContext.with(started.ctx, () => original.apply(this, args)),
+      (result) => started.stream
+        ? recordChatStream(client, result, span, started.startMs, started.warnOnZeroUsage)
+        : recordChatResult(client, result as ChatCompletion, span),
+      (err) => endSpan(span, err),
     );
-
-    const reqBody = safeBody(params);
-    if (reqBody) span.setAttribute("gen_ai.request.body", reqBody);
-
-    const spanCtx = trace.setSpan(ctx, span);
-
-    if (params?.stream) {
-      const streamStartMs = Date.now();
-      const warnOnZeroUsage = system === 'openai' && !params.stream_options?.include_usage;
-      let stream: unknown;
-      try {
-        stream = await otelContext.with(spanCtx, () => original.apply(this, args));
-      } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err));
-        span.recordException(error);
-        span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-        span.end();
-        throw err;
-      }
-      return wrapOpenAIStream(stream, span, streamStartMs, warnOnZeroUsage);
-    }
-
-    let result: ChatCompletion;
-    try {
-      result = (await otelContext.with(spanCtx, () => original.apply(this, args))) as ChatCompletion;
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      span.recordException(error);
-      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-      span.end();
-      throw err;
-    }
-
-    const choice = result.choices?.[0];
-    const completion = choice?.message.content ?? "";
-    const reasoningTokens = result.usage?.completion_tokens_details?.reasoning_tokens ?? 0;
-    const cacheReadTokens = result.usage?.prompt_tokens_details?.cached_tokens ?? 0;
-
-    span.setAttributes({
-      "gen_ai.response.model": result.model,
-      "gen_ai.response.id": result.id,
-      "gen_ai.usage.input_tokens": result.usage?.prompt_tokens ?? 0,
-      "gen_ai.usage.output_tokens": result.usage?.completion_tokens ?? 0,
-      "gen_ai.usage.total_tokens": result.usage?.total_tokens ?? 0,
-      "gen_ai.response.finish_reasons": choice?.finish_reason ? [choice.finish_reason] : [],
-      "evalkit.completion": completion,
-      ...(reasoningTokens && { "gen_ai.usage.reasoning_tokens": reasoningTokens }),
-      ...(cacheReadTokens && { "gen_ai.usage.cache_read_tokens": cacheReadTokens }),
-    });
-
-    const respBody = safeBody(result);
-    if (respBody) span.setAttribute("gen_ai.response.body", respBody);
-
-    emitToolCalls(client, span, fromOpenAIChat(result));
-
-    span.setStatus({ code: SpanStatusCode.OK });
-    span.end();
-    return result;
   };
 
-  (completions.create as { __evalkit?: boolean }).__evalkit = true;
+  (traced as { __evalkit?: boolean }).__evalkit = true;
+  try {
+    completions.create = traced;
+  } catch (err) {
+    swallow("patching chat.completions.create", err);
+  }
 }
 
 function messagesToText(messages: Messages): string {

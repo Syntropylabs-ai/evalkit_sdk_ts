@@ -1,22 +1,25 @@
 import * as http from 'http';
 import * as https from 'https';
 import { trace, context as otelContext, SpanKind, SpanStatusCode } from '@opentelemetry/api';
+import type { Span } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
 import { requireBuiltin } from '../../utils/dynimport.js';
 import { sanitizeHeaders } from '../../utils/headers.js';
 import { _evalkitAxiosSpanMap } from '../../utils/axios-span-map.js';
-import { clientSpanName, serverRoute } from '../../utils/http-route.js';
+import { clientSpanName, markServerSpan, serverName, serverRoute } from '../../utils/http-route.js';
+import { isHealthCheck } from '../../utils/health-check.js';
+import { claimPatch } from '../_patched.js';
+import { swallow } from '../../core/guard.js';
 
 const SKIP_PATTERNS = [
   /\/v1\/ingest/,
-  /\/health(z)?$/,
   /169\.254\./,
   /metadata\.google/,
   /storage\.googleapis/,
 ];
 
 function shouldSkip(url: string): boolean {
-  return SKIP_PATTERNS.some((p) => p.test(url));
+  return SKIP_PATTERNS.some((p) => p.test(url)) || isHealthCheck(url);
 }
 
 function extractUrlMethod(
@@ -62,23 +65,44 @@ export function patchHttp(client: EvalKitClient): void {
 
   for (const { mod, scheme } of mods) {
     const orig = (mod as any).request as Function;
-    if ((orig as any).__evalkit) continue;
+    if ((orig as any).__evalkit || !claimPatch(mod, 'request')) continue;
 
+    // The SDK's work around the request is guarded: when it fails the request is made as if the SDK were not
+    // there, and an error the request itself raises reaches the app once, as raised.
     function evalkitTracedRequest(
       input: string | URL | http.RequestOptions,
       optionsOrCallback?: http.RequestOptions | ((res: http.IncomingMessage) => void),
       callback?: (res: http.IncomingMessage) => void,
     ): http.ClientRequest {
+      let called = false;
+      const callOriginal = (): http.ClientRequest => {
+        called = true;
+        return orig.call(mod, input, optionsOrCallback, callback);
+      };
+      try {
+        return tracedRequest(input, optionsOrCallback, callOriginal);
+      } catch (err) {
+        if (called) throw err;
+        swallow('tracing an outgoing request', err);
+        return orig.call(mod, input, optionsOrCallback, callback);
+      }
+    }
+
+    function tracedRequest(
+      input: string | URL | http.RequestOptions,
+      optionsOrCallback: http.RequestOptions | ((res: http.IncomingMessage) => void) | undefined,
+      callOriginal: () => http.ClientRequest,
+    ): http.ClientRequest {
       const options = typeof optionsOrCallback === 'function' ? undefined : optionsOrCallback;
       const { url, method } = extractUrlMethod(input, options, scheme);
 
       if (shouldSkip(url)) {
-        return orig.call(mod, input, optionsOrCallback, callback);
+        return callOriginal();
       }
 
       const activeSpan = trace.getActiveSpan();
       if (!activeSpan?.isRecording()) {
-        return orig.call(mod, input, optionsOrCallback, callback);
+        return callOriginal();
       }
 
       const reqHeaders: Record<string, string | string[] | undefined> = {
@@ -103,7 +127,7 @@ export function patchHttp(client: EvalKitClient): void {
             axiosSpan.setAttributes({ 'http.request.headers': JSON.stringify(fullHeaders) });
           }
         }
-        return orig.call(mod, input, optionsOrCallback, callback);
+        return callOriginal();
       }
 
       const sanitized = sanitizeHeaders(reqHeaders);
@@ -120,28 +144,12 @@ export function patchHttp(client: EvalKitClient): void {
         },
       }, otelContext.active());
 
-      const req: http.ClientRequest = orig.call(mod, input, optionsOrCallback, callback);
+      const req: http.ClientRequest = callOriginal();
 
       const spanCtx = span.spanContext();
-      req.setHeader('traceparent', `00-${spanCtx.traceId}-${spanCtx.spanId}-01`);
+      try { req.setHeader('traceparent', `00-${spanCtx.traceId}-${spanCtx.spanId}-01`); } catch {  }
 
-      req.on('response', (res: http.IncomingMessage) => {
-        const sc = res.statusCode ?? 0;
-        span.setAttributes({
-          'http.status_code': sc,
-          ...(res.headers ? { 'http.response.headers': JSON.stringify(sanitizeHeaders(res.headers as any)) } : {}),
-        });
-        span.setStatus({ code: sc >= 400 ? SpanStatusCode.ERROR : SpanStatusCode.OK });
-        span.end();
-      });
-
-      req.on('error', (err: Error) => {
-        span.setAttributes({ 'http.status_code': 0, 'error.message': err.message });
-        span.recordException(err instanceof Error ? err : new Error(String(err)));
-        span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
-        span.end();
-      });
-
+      observeClientRequest(req, span);
       return req;
     }
 
@@ -154,17 +162,58 @@ export function patchHttp(client: EvalKitClient): void {
   }
 }
 
-export function patchIncomingHttp(client: EvalKitClient): void {
-  let httpMod: typeof http;
+/**
+ * Ends an outgoing request's span from the events the request emits, through a wrapped `emit` rather than
+ * listeners of its own: a 'response' listener would keep Node from discarding a response the app ignores,
+ * which holds its socket, and an 'error' listener would swallow an error that has no handler of the app's.
+ */
+function observeClientRequest(req: http.ClientRequest, span: Span): void {
+  let ended = false;
   try {
-    httpMod = requireBuiltin<typeof http>('http');
-  } catch {
-    return;
+    const originalEmit = req.emit;
+    req.emit = function (this: http.ClientRequest, event: string | symbol, ...args: any[]): boolean {
+      if (!ended && (event === 'response' || event === 'error')) {
+        ended = true;
+        try {
+          if (event === 'response') {
+            const res = args[0] as http.IncomingMessage;
+            const sc = res?.statusCode ?? 0;
+            span.setAttributes({
+              'http.status_code': sc,
+              ...(res?.headers ? { 'http.response.headers': JSON.stringify(sanitizeHeaders(res.headers as any)) } : {}),
+            });
+            span.setStatus({ code: sc >= 400 ? SpanStatusCode.ERROR : SpanStatusCode.OK });
+          } else {
+            const err = args[0] instanceof Error ? args[0] : new Error(String(args[0]));
+            span.setAttributes({ 'http.status_code': 0, 'error.message': err.message });
+            span.recordException(err);
+            span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+          }
+          span.end();
+        } catch {  }
+      }
+      return originalEmit.call(this, event, ...args);
+    } as typeof req.emit;
+  } catch {  }
+}
+
+// https.Server is a TLS server, not an http.Server, so each prototype is patched for itself.
+export function patchIncomingHttp(client: EvalKitClient): void {
+  for (const name of ['http', 'https'] as const) {
+    try {
+      const mod = requireBuiltin<typeof http>(name);
+      patchServerPrototype(client, mod.Server.prototype);
+    } catch {
+
+    }
   }
+}
 
-  if ((httpMod.Server.prototype.emit as any).__evalkit_server) return;
+function patchServerPrototype(client: EvalKitClient, proto: http.Server): void {
+  if ((proto.emit as any).__evalkit_server) return;
+  if (!claimPatch(proto, 'emit')) return;
 
-  const origEmit = httpMod.Server.prototype.emit as Function;
+  const origEmit = proto.emit as Function;
 
   function evalkitEmit(this: http.Server, event: string, ...args: any[]): boolean {
     if (event !== 'request') return origEmit.call(this, event, ...args);
@@ -177,119 +226,165 @@ export function patchIncomingHttp(client: EvalKitClient): void {
 
     if (trace.getActiveSpan()?.isRecording()) return origEmit.call(this, event, ...args);
 
-    const method = (req.method ?? 'GET').toUpperCase();
-    let pathname = url;
-    try { pathname = new URL(url, 'http://localhost').pathname; } catch { }
+    let ctx: ReturnType<typeof otelContext.active>;
+    try {
+      const method = (req.method ?? 'GET').toUpperCase();
+      let pathname = url;
+      try { pathname = new URL(url, 'http://localhost').pathname; } catch { }
 
-    const traceparentHeader = (req.headers as Record<string, string | string[] | undefined>)['traceparent'];
-    const parentCtx = traceparentHeader
-      ? buildParentCtx(Array.isArray(traceparentHeader) ? traceparentHeader[0] : traceparentHeader)
-      : otelContext.active();
+      const traceparentHeader = (req.headers as Record<string, string | string[] | undefined>)['traceparent'];
+      const parentCtx = traceparentHeader
+        ? buildParentCtx(Array.isArray(traceparentHeader) ? traceparentHeader[0] : traceparentHeader)
+        : otelContext.active();
 
-    const span = client.tracer.startSpan(
-      `${method} ${pathname}`,
-      {
-        kind: SpanKind.SERVER,
-        attributes: {
-          'evalkit.span_type': 'http_call',
-          'http.method': method,
-          'http.url': url,
-          'http.request.headers': JSON.stringify(sanitizeHeaders(req.headers as any)),
+      const span = client.tracer.startSpan(
+        `${method} ${pathname}`,
+        {
+          kind: SpanKind.SERVER,
+          attributes: {
+            'evalkit.span_type': 'http_call',
+            'http.method': method,
+            'http.url': url,
+            'http.request.headers': JSON.stringify(sanitizeHeaders(req.headers as any)),
+          },
         },
-      },
-      parentCtx,
-    );
+        parentCtx,
+      );
 
-    const ctx = trace.setSpan(parentCtx, span);
+      ctx = trace.setSpan(parentCtx, span);
+      markServerSpan(req, { span, ctx });
 
-    const spanCtx = span.spanContext();
-    res.setHeader('x-trace-id', spanCtx.traceId);
-    res.setHeader('traceparent', `00-${spanCtx.traceId}-${spanCtx.spanId}-01`);
+      const spanCtx = span.spanContext();
+      res.setHeader('x-trace-id', spanCtx.traceId);
+      res.setHeader('traceparent', `00-${spanCtx.traceId}-${spanCtx.spanId}-01`);
 
-    const BODY_MAX = client.options.maxBodyBytes;
-    const reqContentType = String(
-      (req.headers as Record<string, string | string[] | undefined>)['content-type'] ?? '',
-    ).toLowerCase();
-    const isMultipart = reqContentType.includes('multipart/form-data');
-    if (!isMultipart) {
-      const reqBodyChunks: Buffer[] = [];
-      let reqBodyLen = 0;
-      req.on('data', (chunk: unknown) => {
+      const BODY_MAX = client.options.maxBodyBytes;
+      const reqContentType = String(
+        (req.headers as Record<string, string | string[] | undefined>)['content-type'] ?? '',
+      ).toLowerCase();
+      const isMultipart = reqContentType.includes('multipart/form-data');
+      const requestBody = isMultipart ? undefined : observeRequestBody(req, BODY_MAX, span);
+
+      const bodyChunks: Buffer[] = [];
+      let bodyLen = 0;
+      const captureChunk = (chunk: unknown) => {
         try {
-          if (chunk && reqBodyLen < BODY_MAX) {
-            const b = Buffer.isBuffer(chunk) ? chunk : typeof chunk === 'string' ? Buffer.from(chunk) : null;
-            if (b && b.length) { reqBodyChunks.push(b); reqBodyLen += b.length; }
+          if (chunk && typeof chunk !== 'function' && bodyLen < BODY_MAX) {
+            const b = Buffer.isBuffer(chunk)
+              ? chunk
+              : typeof chunk === 'string'
+                ? Buffer.from(chunk)
+                : null;
+            if (b && b.length) { bodyChunks.push(b); bodyLen += b.length; }
           }
         } catch {  }
-      });
-      req.on('end', () => {
-        if (!reqBodyChunks.length) return;
+      };
+      const origWrite = res.write.bind(res);
+      const origEnd = res.end.bind(res);
+      (res as any).write = function (chunk: any, ...rest: any[]) { captureChunk(chunk); return (origWrite as any)(chunk, ...rest); };
+      (res as any).end = function (chunk: any, ...rest: any[]) { captureChunk(chunk); return (origEnd as any)(chunk, ...rest); };
+
+      // The framework matches the route after this span opened, so the name is settled when the
+      // response is done: `GET /orders/:id`, or the raw path when no route matched.
+      const nameByRoute = () => {
+        const route = serverRoute(req);
+        if (route) span.setAttribute('http.route', route);
+        const named = serverName(req);
+        if (named) span.updateName(named);
+        else if (route) span.updateName(`${method} ${route}`);
+      };
+
+      let ended = false;
+      const finish = (err?: Error): void => {
+        if (ended) return;
+        ended = true;
         try {
-          const raw = Buffer.concat(reqBodyChunks).subarray(0, BODY_MAX).toString('utf-8');
-          if (raw) span.setAttribute('http.request.body', raw);
+          nameByRoute();
+          requestBody?.record();
+          span.setAttribute('http.status_code', res.statusCode);
+          try {
+            const respHeaders = res.getHeaders();
+            if (respHeaders && Object.keys(respHeaders).length) {
+              span.setAttribute('http.response.headers', JSON.stringify(sanitizeHeaders(respHeaders as any)));
+            }
+          } catch {  }
+          if (bodyChunks.length) {
+            try {
+              const raw = Buffer.concat(bodyChunks).subarray(0, BODY_MAX).toString('utf-8');
+              if (raw) span.setAttribute('http.response.body', raw);
+            } catch {  }
+          }
+          if (err) {
+            span.setAttribute('error.message', err.message);
+            span.recordException(err);
+            span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+          } else {
+            span.setStatus({ code: res.statusCode >= 400 ? SpanStatusCode.ERROR : SpanStatusCode.OK });
+          }
+          span.end();
         } catch {  }
-      });
+      };
+      // Observed through `emit`, not listeners: an 'error' listener would swallow an error the app has no
+      // handler for. 'close' without 'finish' is a client that went away before the response was done.
+      try {
+        const resEmit = res.emit;
+        res.emit = function (this: http.ServerResponse, name: string | symbol, ...rest: any[]): boolean {
+          if (name === 'finish' || name === 'close') finish();
+          else if (name === 'error') finish(rest[0] instanceof Error ? rest[0] : new Error(String(rest[0])));
+          return resEmit.call(this, name, ...rest);
+        } as typeof res.emit;
+      } catch {  }
+    } catch (err) {
+      swallow('tracing an incoming request', err);
+      return origEmit.call(this, event, ...args);
     }
-
-    const bodyChunks: Buffer[] = [];
-    let bodyLen = 0;
-    const captureChunk = (chunk: unknown) => {
-      try {
-        if (chunk && typeof chunk !== 'function' && bodyLen < BODY_MAX) {
-          const b = Buffer.isBuffer(chunk)
-            ? chunk
-            : typeof chunk === 'string'
-              ? Buffer.from(chunk)
-              : null;
-          if (b && b.length) { bodyChunks.push(b); bodyLen += b.length; }
-        }
-      } catch {  }
-    };
-    const origWrite = res.write.bind(res);
-    const origEnd = res.end.bind(res);
-    (res as any).write = function (chunk: any, ...rest: any[]) { captureChunk(chunk); return (origWrite as any)(chunk, ...rest); };
-    (res as any).end = function (chunk: any, ...rest: any[]) { captureChunk(chunk); return (origEnd as any)(chunk, ...rest); };
-
-    // The framework matches the route after this span opened, so the name is settled when the
-    // response is done: `GET /orders/:id`, or the raw path when no route matched.
-    const nameByRoute = () => {
-      const route = serverRoute(req);
-      if (!route) return;
-      span.updateName(`${method} ${route}`);
-      span.setAttribute('http.route', route);
-    };
-
-    res.on('finish', () => {
-      nameByRoute();
-      span.setAttribute('http.status_code', res.statusCode);
-      try {
-        const respHeaders = res.getHeaders();
-        if (respHeaders && Object.keys(respHeaders).length) {
-          span.setAttribute('http.response.headers', JSON.stringify(sanitizeHeaders(respHeaders as any)));
-        }
-      } catch {  }
-      if (bodyChunks.length) {
-        try {
-          const raw = Buffer.concat(bodyChunks).subarray(0, BODY_MAX).toString('utf-8');
-          if (raw) span.setAttribute('http.response.body', raw);
-        } catch {  }
-      }
-      span.setStatus({ code: res.statusCode >= 400 ? SpanStatusCode.ERROR : SpanStatusCode.OK });
-      span.end();
-    });
-    res.on('error', (err: Error) => {
-      nameByRoute();
-      span.setAttribute('error.message', err.message);
-      span.recordException(err instanceof Error ? err : new Error(String(err)));
-      span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
-      span.end();
-    });
 
     return otelContext.with(ctx, () => origEmit.call(this, event, ...args));
   }
 
   (evalkitEmit as any).__evalkit_server = true;
-  httpMod.Server.prototype.emit = evalkitEmit as typeof httpMod.Server.prototype.emit;
+  proto.emit = evalkitEmit as typeof proto.emit;
+}
+
+/**
+ * Records the request body as the app's own framework reads it. Every chunk a readable stream hands a
+ * consumer goes out through its `emit('data')`, whether the consumer listens for 'data', reads on
+ * 'readable', pipes or iterates, so wrapping `emit` sees the body without reading it. Listening for 'data'
+ * here would switch the request into flowing mode, and every chunk sent before the framework attached its
+ * own reader (after an async auth step, say) would be lost to it. A body nothing reads is not recorded.
+ */
+function observeRequestBody(
+  req: http.IncomingMessage,
+  max: number,
+  span: { setAttribute: (key: string, value: string) => unknown },
+): { record: () => void } {
+  const chunks: Buffer[] = [];
+  let length = 0;
+  let recorded = false;
+  const record = (): void => {
+    if (recorded || !chunks.length) return;
+    recorded = true;
+    try {
+      const raw = Buffer.concat(chunks).subarray(0, max).toString('utf-8');
+      if (raw) span.setAttribute('http.request.body', raw);
+    } catch {  }
+  };
+  try {
+    const originalEmit = req.emit;
+    req.emit = function (this: http.IncomingMessage, event: string | symbol, ...args: any[]): boolean {
+      try {
+        if (event === 'data' && length < max) {
+          const chunk = args[0];
+          const b = Buffer.isBuffer(chunk) ? chunk : typeof chunk === 'string' ? Buffer.from(chunk) : null;
+          if (b && b.length) { chunks.push(b); length += b.length; }
+        } else if (event === 'end') {
+          record();
+        }
+      } catch {  }
+      return originalEmit.call(this, event, ...args);
+    } as typeof req.emit;
+  } catch {  }
+  return { record };
 }
 
 function buildParentCtx(traceparent: string): ReturnType<typeof otelContext.active> {
@@ -313,36 +408,58 @@ function buildParentCtx(traceparent: string): ReturnType<typeof otelContext.acti
 export function patchFetch(): void {
   if (typeof globalThis.fetch !== 'function') return;
   if ((globalThis.fetch as any).__evalkit) return;
+  if (!claimPatch(globalThis, 'fetch')) return;
 
   const origFetch = globalThis.fetch.bind(globalThis);
 
+  // As for http.request: the SDK's work is guarded, and fetch's own outcome reaches the app as it was.
   globalThis.fetch = async function evalkitFetch(
     input: RequestInfo | URL,
     init?: RequestInit,
   ): Promise<Response> {
+    let called = false;
+    const callOriginal = (sentInit: RequestInit | undefined): Promise<Response> => {
+      called = true;
+      return origFetch(input, sentInit);
+    };
+    try {
+      return await tracedFetch(input, init, callOriginal);
+    } catch (err) {
+      if (called) throw err;
+      swallow('tracing a fetch', err);
+      return origFetch(input, init);
+    }
+  } as typeof fetch;
+
+  async function tracedFetch(
+    input: RequestInfo | URL,
+    init: RequestInit | undefined,
+    callOriginal: (sentInit: RequestInit | undefined) => Promise<Response>,
+  ): Promise<Response> {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-    if (shouldSkip(url)) return origFetch(input, init);
+    if (shouldSkip(url)) return callOriginal(init);
 
     const activeSpan = trace.getActiveSpan();
-    if (!activeSpan?.isRecording()) return origFetch(input, init);
+    if (!activeSpan?.isRecording()) return callOriginal(init);
 
-    const method = (init?.method ?? 'GET').toUpperCase();
-    let pathname = url;
-    try { pathname = new URL(url).pathname; } catch { }
+    // A Request carries its own method and headers; headers given in `init` replace the Request's whole,
+    // so the added traceparent must travel with the Request's headers when `init` has none of its own.
+    const request = typeof input === 'object' && !(input instanceof URL) ? (input as Request) : undefined;
+    const method = (init?.method ?? request?.method ?? 'GET').toUpperCase();
 
+    let modifiedInit: RequestInit | undefined = init;
     const rawHeaders: Record<string, string> = {};
-    if (init?.headers) {
-      const h = new Headers(init.headers);
-      h.forEach((v, k) => { rawHeaders[k] = v; });
+    try {
+      const sent = init?.headers !== undefined ? init.headers : request?.headers;
+      if (sent) new Headers(sent).forEach((v, k) => { rawHeaders[k] = v; });
+      const activeSpanCtx = activeSpan.spanContext();
+      const headers = new Headers(sent);
+      headers.set('traceparent', `00-${activeSpanCtx.traceId}-${activeSpanCtx.spanId}-01`);
+      modifiedInit = { ...init, headers };
+    } catch {
+      modifiedInit = init;
     }
     const sanitizedReq = sanitizeHeaders(rawHeaders);
-
-    const activeSpanCtx = activeSpan.spanContext();
-    const traceparent = `00-${activeSpanCtx.traceId}-${activeSpanCtx.spanId}-01`;
-
-    const headers = new Headers(init?.headers);
-    headers.set('traceparent', traceparent);
-    const modifiedInit: RequestInit = { ...init, headers };
 
     if (Object.keys(sanitizedReq).length) {
       activeSpan.addEvent('http.fetch.request', {
@@ -353,24 +470,30 @@ export function patchFetch(): void {
     }
 
     try {
-      const res = await origFetch(input, modifiedInit);
-      const respHeaders: Record<string, string> = {};
-      res.headers.forEach((v, k) => { respHeaders[k] = v; });
-      activeSpan.addEvent('http.fetch.response', {
-        'http.url': url,
-        'http.status_code': res.status,
-        'http.response.headers': JSON.stringify(sanitizeHeaders(respHeaders)),
-      });
+      const res = await callOriginal(modifiedInit);
+      try {
+        const respHeaders: Record<string, string> = {};
+        res.headers.forEach((v, k) => { respHeaders[k] = v; });
+        activeSpan.addEvent('http.fetch.response', {
+          'http.url': url,
+          'http.status_code': res.status,
+          'http.response.headers': JSON.stringify(sanitizeHeaders(respHeaders)),
+        });
+      } catch (err) {
+        swallow('recording a fetch response', err);
+      }
       return res;
     } catch (err: any) {
-      activeSpan.addEvent('http.fetch.error', {
-        'http.url': url,
-        'error.message': err?.message ?? String(err),
-        'error.stack': err?.stack ?? '',
-      });
+      try {
+        activeSpan.addEvent('http.fetch.error', {
+          'http.url': url,
+          'error.message': err?.message ?? String(err),
+          'error.stack': err?.stack ?? '',
+        });
+      } catch {  }
       throw err;
     }
-  } as typeof fetch;
+  }
 
   (globalThis.fetch as any).__evalkit = true;
 }

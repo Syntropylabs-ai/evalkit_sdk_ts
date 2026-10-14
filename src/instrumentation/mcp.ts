@@ -1,5 +1,6 @@
 import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opentelemetry/api";
 import type { EvalKitClient } from "../core/client.js";
+import { claimPatch } from "./_patched.js";
 
 const ARGS_MAX = 32768;
 
@@ -26,6 +27,7 @@ export function patchMcp(client: EvalKitClient, target: any): void {
   const proto = target?.prototype ?? (target ? Object.getPrototypeOf(target) : null);
   if (!proto || typeof proto.callTool !== "function") return;
   if ((proto.callTool as { __evalkit?: boolean }).__evalkit) return;
+  if (!claimPatch(proto, "callTool")) return;
 
   const original = proto.callTool;
 

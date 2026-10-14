@@ -1,4 +1,5 @@
 import type { EvalKitClient } from '../../../core/client.js';
+import { claimPatch } from '../../_patched.js';
 
 const CAP = 8192;
 
@@ -167,6 +168,7 @@ export function patchOpenAIRealtime(client: EvalKitClient, RealtimeClass: any): 
     const origOn = typeof proto.on === 'function' ? proto.on : null;
     if (!origOn) return;
     if ((proto.on as { __evalkit?: boolean }).__evalkit) return;
+    if (!claimPatch(proto, 'on')) return;
 
     proto.on = function (this: any, ...args: any[]): any {
       try {

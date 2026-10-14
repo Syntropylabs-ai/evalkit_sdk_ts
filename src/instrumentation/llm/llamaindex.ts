@@ -2,6 +2,7 @@ import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opente
 import type { Span, Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody } from "./_body.js";
+import { claimPatch } from "../_patched.js";
 
 type Rec = { span: Span; ctx: OtelContext; reasonId: string | undefined };
 
@@ -48,6 +49,7 @@ export function patchLlamaIndex(client: EvalKitClient, mod: any): void {
   const Settings = mod?.Settings;
   const cb = Settings?.callbackManager;
   if (!cb || typeof cb.on !== "function" || cb.__evalkitPatched) return;
+  if (!claimPatch(cb, "on")) return;
 
   const records = new Map<string, Rec>();
 

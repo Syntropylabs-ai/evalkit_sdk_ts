@@ -1,7 +1,8 @@
 import { context as otelContext, trace as otelTrace } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
 import { extractTraceparent } from '../../core/context.js';
-import { serverRoute } from '../../utils/http-route.js';
+import { serverRoute, serverSpanOf, setServerName } from '../../utils/http-route.js';
+import { isHealthCheck } from '../../utils/health-check.js';
 
 export interface ExpressMiddlewareOptions {
   name?: string | ((req: any) => string);
@@ -12,7 +13,15 @@ export function createExpressMiddleware(
   options?: ExpressMiddlewareOptions,
 ): (req: any, res: any, next: any) => void {
   return (req: any, res: any, next: any) => {
-    if (req._evalkitCtx || otelTrace.getActiveSpan()?.isRecording()) return next();
+    // A health probe is not recorded, as the http server's own instrumentation does not record it.
+    if (isHealthCheck(req.originalUrl ?? req.url)) return next();
+    if (req._evalkitCtx || otelTrace.getActiveSpan()?.isRecording()) {
+      if (typeof options?.name === 'string' && serverSpanOf(req)) setServerName(req, options.name);
+      else if (typeof options?.name === 'function' && serverSpanOf(req)) {
+        try { setServerName(req, options.name(req)); } catch {  }
+      }
+      return next();
+    }
     const traceName = typeof options?.name === 'function'
       ? options.name(req)
       : (options?.name ?? `${String(req.method)} ${String(req.route?.path ?? req.path ?? req.url)}`);

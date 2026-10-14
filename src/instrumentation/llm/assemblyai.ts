@@ -1,9 +1,11 @@
 import { SpanKind, SpanStatusCode, context as otelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody } from "./_body.js";
+import { claimPatch } from "../_patched.js";
 
 export function patchAssemblyAI(client: EvalKitClient, TranscriptService: any): void {
   if (typeof TranscriptService?.prototype?.transcribe !== "function" || TranscriptService.prototype.transcribe.__evalkit) return;
+  if (!claimPatch(TranscriptService.prototype, "transcribe")) return;
   const original = TranscriptService.prototype.transcribe;
 
   async function traced(this: any, params: any = {}, ...rest: any[]) {

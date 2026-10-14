@@ -75,7 +75,7 @@ const srv = http.createServer((req, res) => {
     assert.strictEqual(outbound[0].traceId, order[0].traceId);
 
     const charge = http_.filter((e) => url(e).endsWith('/charges/ch_demo_4821/refunds') && e.spanKind === 'SERVER');
-    assert.ok(charge.length >= 1, 'the downstream request has a server span');
+    assert.strictEqual(charge.length, 1, 'the downstream request has one server span: the NestJS interceptor names it and opens none of its own');
     for (const span of charge) {
       assert.strictEqual(span.operation, 'POST /charges/:chargeId/refunds', `${span.operation}: the Fastify route reaches the server span the http instrumentation opened`);
     }

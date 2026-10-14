@@ -1,13 +1,9 @@
-import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opentelemetry/api";
 import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
 import { patchAnthropic } from "../anthropic/index.js";
-import { safeBody } from "../_body.js";
-import { generativeModelRequestAttrs } from "../_request.js";
-import type { GoogleUsage, GoogleUsageMetadata } from "../_google-usage.js";
-import { EMPTY_GOOGLE_USAGE, extractGoogleUsage, googleUsageAttributes, mergeGoogleUsage } from "../_google-usage.js";
+import { patchGenerativeModel } from "../google-ai/index.js";
 
-type AnthropicMessages = { create: (...args: unknown[]) => Promise<unknown> };
+type AnthropicMessages = { create: (...args: unknown[]) => unknown };
 
 export function patchAnthropicVertex(
   client: EvalKitClient,
@@ -17,17 +13,9 @@ export function patchAnthropicVertex(
   patchAnthropic(client, messages, parentCtx);
 }
 
-type VertexContent = { role?: string; parts: Array<{ text?: string }> };
-type VertexRequest = { contents?: VertexContent[]; systemInstruction?: { parts: Array<{ text?: string }> } };
-type VertexCandidate = { content?: { parts?: Array<{ text?: string }> }; finishReason?: string };
-type VertexResponse = {
-  response?: {
-    candidates?: VertexCandidate[];
-    usageMetadata?: GoogleUsageMetadata;
-  };
-};
 type GenerativeModel = {
-  generateContent: (...args: unknown[]) => Promise<unknown>;
+  generateContent?: (...args: unknown[]) => unknown;
+  generateContentStream?: (...args: unknown[]) => unknown;
   model?: string;
 };
 
@@ -36,72 +24,5 @@ export function patchVertexGenerativeModel(
   model: GenerativeModel,
   parentCtx?: OtelContext
 ): void {
-  if ((model.generateContent as any).__evalkit) return;
-
-  const original = model.generateContent;
-  const modelName = model.model ?? 'unknown';
-
-  model.generateContent = async function (this: unknown, ...args: unknown[]): Promise<unknown> {
-    const req = args[0] as VertexRequest;
-    const systemText = req?.systemInstruction?.parts?.map((p) => p.text ?? '').join('') ?? '';
-    const promptLines = req?.contents?.map(
-      (c) => `${c.role ?? 'user'}: ${c.parts.map((p) => p.text ?? '').join('')}`
-    ) ?? [];
-    const promptText = [systemText ? `system: ${systemText}` : '', ...promptLines]
-      .filter(Boolean)
-      .join('\n');
-
-    const ctx = parentCtx ?? otelContext.active();
-    const span = client.tracer.startSpan(
-      'generateContent',
-      {
-        kind: SpanKind.CLIENT,
-        attributes: {
-          'evalkit.span_type': 'llm_call',
-          'gen_ai.system': 'google-vertex',
-          'gen_ai.request.model': modelName,
-          ...generativeModelRequestAttrs(model, req),
-          'evalkit.prompt': promptText,
-        },
-      },
-      ctx
-    );
-
-    const reqBody = safeBody(req);
-    if (reqBody) span.setAttribute('gen_ai.request.body', reqBody);
-
-    const spanCtx = trace.setSpan(ctx, span);
-
-    let result: VertexResponse;
-    try {
-      result = (await otelContext.with(spanCtx, () => original.apply(this, args))) as VertexResponse;
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      span.recordException(error);
-      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-      span.end();
-      throw err;
-    }
-
-    const resp = result?.response;
-    const firstCandidate = resp?.candidates?.[0];
-    const completionText = firstCandidate?.content?.parts?.map((p) => p.text ?? '').join('') ?? '';
-
-    span.setAttributes({
-      'gen_ai.response.model': modelName,
-      ...googleUsageAttributes(extractGoogleUsage(resp?.usageMetadata)),
-      'gen_ai.response.finish_reasons': firstCandidate?.finishReason ? [firstCandidate.finishReason] : [],
-      'evalkit.completion': completionText,
-    });
-
-
-    const respBody = safeBody(result);
-    if (respBody) span.setAttribute('gen_ai.response.body', respBody);
-
-    span.setStatus({ code: SpanStatusCode.OK });
-    span.end();
-    return result;
-  };
-
-  (model.generateContent as any).__evalkit = true;
+  patchGenerativeModel(client, model, { system: 'google-vertex', parentCtx });
 }

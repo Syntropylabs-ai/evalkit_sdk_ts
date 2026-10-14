@@ -1,5 +1,6 @@
 import type { EvalKitClient } from '../../core/client.js';
 import { extractGoogleUsage, googleUsageAttributes } from './_google-usage.js';
+import { claimPatch } from '../_patched.js';
 
 const MAX_TEXT = 8192;
 
@@ -273,6 +274,7 @@ export function patchGoogleLive(client: EvalKitClient, LiveClass: any): void {
   const proto = LiveClass?.prototype;
   if (!proto || typeof proto.connect !== 'function') return;
   if ((proto.connect as { __evalkit?: boolean }).__evalkit) return;
+  if (!claimPatch(proto, "connect")) return;
   const original = proto.connect;
   proto.connect = async function (this: unknown, params: any, ...rest: any[]): Promise<unknown> {
     const { params: wrapped, attach } = wrapConnectParams(client, params ?? {});
