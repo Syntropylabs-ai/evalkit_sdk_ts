@@ -1,4 +1,5 @@
 import { SpanStatusCode } from "@opentelemetry/api";
+import { recordError } from '../../../core/exceptions.js';
 import type { Span } from "@opentelemetry/api";
 import { emitToolCalls } from "../_toolcalls.js";
 import { safeBody } from "../_body.js";
@@ -14,8 +15,7 @@ export function toError(err: unknown): Error {
 export function failSpan(span: Span, err: unknown): void {
   const error = toError(err);
   try {
-    span.recordException(error);
-    span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+    recordError(span, error, { escaped: true });
   } catch {  }
   endSpan(span);
 }
@@ -66,8 +66,7 @@ export function applyResponse(
 
   if (options?.error) {
     try {
-      span.recordException(options.error);
-      span.setStatus({ code: SpanStatusCode.ERROR, message: options.error.message });
+      recordError(span, options.error, { escaped: true });
     } catch {  }
     return;
   }

@@ -1,6 +1,20 @@
 import { createRequire } from 'module';
 
-export const dynImport = new Function('s', 'return import(s)') as (s: string) => Promise<any>;
+let importer: ((s: string) => Promise<any>) | undefined;
+
+/**
+ * import() of a specifier only known at run time, hidden from bundlers that would otherwise try to resolve
+ * every optional peer at build time. Made on first use: a runtime that forbids code generation from strings
+ * (a Content-Security-Policy, some edge runtimes) then fails only that call, never the SDK's import.
+ */
+export function dynImport(s: string): Promise<any> {
+  try {
+    if (!importer) importer = new Function('s', 'return import(s)') as (s: string) => Promise<any>;
+    return importer(s);
+  } catch (err) {
+    return Promise.reject(err);
+  }
+}
 
 let sdkRequire: NodeRequire | undefined;
 

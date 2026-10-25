@@ -1,8 +1,10 @@
 import { context as otelContext } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
+import { boundedText } from '../../core/serialize.js';
 import { extractTraceparent } from '../../core/context.js';
 import { serverSpanOf, setServerName, setServerRoute } from '../../utils/http-route.js';
-import { isHealthCheck } from '../../utils/health-check.js';
+import { isIgnoredRequest } from '../../core/ignore.js';
+import { dropSpan, tracingSuppressed } from '../../core/suppress.js';
 
 export interface HapiPluginOptions {
   name?: string | ((request: any) => string);
@@ -22,8 +24,17 @@ export function createHapiPlugin(
       }>();
 
       server.ext('onRequest', (request: any, h: any) => {
-        // A health probe is not recorded, as the http server's own instrumentation does not record it.
-        if (isHealthCheck(request.path)) return h.continue;
+        // Already untraced: the http server left out an ignored route or a probe.
+        if (tracingSuppressed()) return h.continue;
+        // A health probe or an ignored route is not recorded. hapi runs the rest of the request outside this
+        // hook, so instead of a suppressed context the server span the http server opened is dropped, and with
+        // it every span started under it.
+        const route = request.route?.method !== '_special' ? request.route?.path : undefined;
+        if (isIgnoredRequest(request.method, request.path, route)) {
+          const core = serverSpanOf(request.raw?.req);
+          if (core) dropSpan(core.span);
+          return h.continue;
+        }
 
         const traceName = typeof options?.name === 'function'
           ? options.name(request)
@@ -64,10 +75,14 @@ export function createHapiPlugin(
           try {
             const src = request.response?.source ?? request.response?.result;
             if (src !== undefined && src !== null) {
-              responseBody = (typeof src === 'string' ? src : JSON.stringify(src)).slice(0, client.options.maxBodyBytes);
+              responseBody = typeof src === 'string' ? src.slice(0, client.options.maxBodyBytes) : boundedText(src, client.options.maxBodyBytes);
             }
           } catch {  }
-          entry.end(sc >= 400 ? 'ERROR' : 'OK', { statusCode: sc, body: responseBody });
+          // hapi answers a failed handler with a Boom error, which carries the original error's message.
+          const error = request.response?.isBoom ? request.response : undefined;
+          try {
+            entry.end(sc >= 400 ? 'ERROR' : 'OK', { statusCode: sc, body: responseBody, ...(error ? { error } : {}) });
+          } catch {  }
           requestEndMap.delete(request);
         }
         return h.continue;

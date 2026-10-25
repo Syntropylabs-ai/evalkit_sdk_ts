@@ -1,4 +1,5 @@
 import { SpanKind, SpanStatusCode, type Span } from "@opentelemetry/api";
+import { recordError } from '../core/exceptions.js';
 import type { EvalKitClient } from "../core/client.js";
 import { claimPatch } from "./_patched.js";
 
@@ -89,8 +90,7 @@ export function patchGoogleAdk(client: EvalKitClient, adkModule: any): void {
       toolSpans.delete(params.toolContext);
       try {
         if (span) {
-          span.recordException(params.error);
-          span.setStatus({ code: SpanStatusCode.ERROR, message: params.error?.message });
+          recordError(span, params.error, { escaped: true });
           span.end();
         }
       } catch {  }
@@ -162,8 +162,7 @@ export function patchGoogleAdk(client: EvalKitClient, adkModule: any): void {
         } catch {  }
         if (failure) {
           try {
-            span.recordException(failure);
-            span.setStatus({ code: SpanStatusCode.ERROR, message: failure.message });
+            recordError(span, failure, { escaped: true });
           } catch {  }
         } else {
           try { span.setStatus({ code: SpanStatusCode.OK }); } catch {  }

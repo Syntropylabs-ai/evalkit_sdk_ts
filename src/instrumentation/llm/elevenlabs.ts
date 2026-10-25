@@ -1,4 +1,5 @@
 import { SpanKind, SpanStatusCode, context as otelContext } from "@opentelemetry/api";
+import { recordError } from '../../core/exceptions.js';
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody } from "./_body.js";
 import { claimPatch } from "../_patched.js";
@@ -29,9 +30,8 @@ function patchConvert(client: EvalKitClient, proto: any): void {
       return result;
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      span.recordException(error);
       span.setAttributes({ "gen_ai.audio.input_characters": text.length, "gen_ai.request.voice": voiceId });
-      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+      recordError(span, error, { escaped: true });
       span.end();
       throw err;
     }

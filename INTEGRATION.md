@@ -40,11 +40,18 @@ init({
   debug: false,                               // verbose exporter logging
   maxExportBatchSize: 512,                     // flush trigger
   scheduledDelayMillis: 5000,                  // background flush interval
-  maxBodyBytes: 10 * 1024 * 1024,             // cap on captured HTTP req/resp bodies
+  maxBodyBytes: 64 * 1024,                     // cap on captured HTTP req/resp bodies
+  maxValueBytes: 16 * 1024 * 1024,             // cap on one attribute value; longer ones keep start and end
+  maxQueueSize: 2048,                          // spans waiting for export
+  maxQueueBytes: 32 * 1024 * 1024,             // memory those spans may hold
+  sampleRate: 1,                               // share of traces kept; model calls, tools and errors always are
+  consoleSpanLevel: "warn",                    // console levels that become spans of their own
+  exitHooks: true,                             // flush on beforeExit, SIGTERM and SIGINT
+  captureGlobalErrors: false,                  // record uncaught exceptions and unhandled rejections
 });
 ```
 
-Only `subscriptionKey` is required. Every other option has a default.
+Only `subscriptionKey` is required. Every other option has a default. Options that cannot work leave the SDK off with one warning; `init()` never throws. `EVALKIT_DISABLED=true` or `OTEL_SDK_DISABLED=true` turns the SDK off.
 
 ## 4. What gets traced automatically
 
@@ -57,7 +64,7 @@ After `init()`, the SDK instruments these libraries when your app uses them:
 | Mongoose, Redis (`ioredis` and `redis`), `pg` and `mysql2`, and Prisma when `@prisma/instrumentation` is installed | `db_query` |
 | MCP tool calls | `tool_call` |
 
-When `@opentelemetry/instrumentation` is installed, the SDK also registers the OpenTelemetry instrumentations it finds. That is everything in `@opentelemetry/auto-instrumentations-node` except `fs`, `undici` and `http`, or, without that package, the Prisma, MongoDB, Mongoose, ioredis, Redis, pg, mysql2, GraphQL and NestJS instrumentations that are installed.
+When `@opentelemetry/instrumentation` is installed and the SDK runs its own provider, it also registers the OpenTelemetry instrumentations it finds (attached to a provider of yours, it leaves instrumentation to your setup). That is everything in `@opentelemetry/auto-instrumentations-node` except `fs`, `undici` and `http`, or, without that package, the Prisma, MongoDB, Mongoose, ioredis, Redis, pg, mysql2, GraphQL and NestJS instrumentations that are installed.
 
 Another OpenTelemetry instrumentation can report the same LLM call as EvalKit. Its span is still exported, but as a `function_call` with no token counts, so tokens and cost are counted once, from EvalKit's own `llm_call` span. Set `EVALKIT_COUNT_FOREIGN_LLM=1` to count those spans too.
 
@@ -256,8 +263,10 @@ Spans are batched and exported in the background. Flush them yourself in short-l
 
 ```ts
 import { flush } from "syntropylabs-evalkit";
-await flush();
+await flush();          // resolves false, never rejects, after 5 s at most: flush(timeoutMs) changes that
 ```
+
+The SDK also flushes on `beforeExit`, and on `SIGTERM` / `SIGINT` when your app has no handler of its own for the signal, then lets the signal end the process. For AWS Lambda wrap the handler in `withLambda(handler)`; in Next.js call `flushAfter(after)`, and on Vercel or Cloudflare `flushAfter((t) => ctx.waitUntil(t))`. On the Edge runtime, Workers and browsers the package resolves to a stub that traces nothing; in Next.js initialise only when `process.env.NEXT_RUNTIME === "nodejs"`. `getStats()` reports queued, exported and dropped spans and the export circuit's state.
 
 ## 12. Troubleshooting
 

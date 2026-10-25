@@ -1,4 +1,5 @@
 import { SpanKind, SpanStatusCode, context as otelContext } from "@opentelemetry/api";
+import { recordError } from '../../core/exceptions.js';
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody } from "./_body.js";
 import { claimPatch } from "../_patched.js";
@@ -15,8 +16,7 @@ function startAudioSpan(client: EvalKitClient, operation: string, model: string,
       if (opts.extra) span.setAttributes(opts.extra);
       if (opts.err) {
         const error = opts.err instanceof Error ? opts.err : new Error(String(opts.err));
-        span.recordException(error);
-        span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+        recordError(span, error, { escaped: true });
       } else {
         span.setStatus({ code: status === "OK" ? SpanStatusCode.OK : SpanStatusCode.ERROR });
       }

@@ -1,4 +1,5 @@
 import { SpanKind, SpanStatusCode, context as otelContext } from "@opentelemetry/api";
+import { recordError } from '../../core/exceptions.js';
 import type { EvalKitClient } from "../../core/client.js";
 
 export { safeBody } from "../llm/_body.js";
@@ -27,9 +28,7 @@ export function startVectorDb(
       if (attrs) span.setAttributes(attrs);
       if (err) {
         const error = err instanceof Error ? err : new Error(String(err));
-        span.recordException(error);
-        span.setAttribute("error.message", error.message);
-        span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+        recordError(span, error, { escaped: true });
       } else {
         span.setStatus({ code: status === "OK" ? SpanStatusCode.OK : SpanStatusCode.ERROR });
       }

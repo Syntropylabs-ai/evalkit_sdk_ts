@@ -1,4 +1,5 @@
 import { SpanKind, SpanStatusCode, context as otelContext } from "@opentelemetry/api";
+import { recordError } from '../../core/exceptions.js';
 import type { EvalKitClient } from "../../core/client.js";
 import { safeBody } from "./_body.js";
 import { claimPatch } from "../_patched.js";
@@ -22,8 +23,7 @@ export function patchAssemblyAI(client: EvalKitClient, TranscriptService: any): 
       result = await original.call(this, params, ...rest);
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      span.recordException(error);
-      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+      recordError(span, error, { escaped: true });
       span.end();
       throw err;
     }

@@ -106,6 +106,20 @@ export const URL_ATTRIBUTES: ReadonlySet<string> = new Set([
 
 export const QUERY_ATTRIBUTES: ReadonlySet<string> = new Set(["url.query"]);
 
+/** An error's message and stack, wherever the exception contract records them. */
+export const ERROR_MESSAGE_ATTRIBUTES: ReadonlySet<string> = new Set([
+  "exception.message",
+  "exception.stacktrace",
+  "error.message",
+  "error.stack",
+  "evalkit.exception.causes",
+]);
+
+/** An error message or stack with its secrets scrubbed, the query strings of URLs inside it included. */
+export function scrubErrorMessage(value: string): string {
+  return scrubEmbeddedQueries(scrubString(value));
+}
+
 const URL_RE = /^(?:https?|wss?):\/\/\S+$/i;
 
 const MAX_DEPTH = 12;
@@ -160,6 +174,21 @@ export function isSecretQueryKey(key: string): boolean {
 
 export function isUrl(value: string): boolean {
   return URL_RE.test(value.trim());
+}
+
+// A URL written into an error's message with a query: its credential-named parameters are masked as they are
+// in a URL attribute, so `GET https://api.example.com/v1?api_key=...: 401` keeps only the parameter's name.
+// Only error messages are read this way: other free text (a prompt, a log line) keeps the URLs it quotes.
+const EMBEDDED_URL_QUERY_RE = /\b((?:https?|wss?):\/\/[^\s?#'"<>]*)\?([^\s#'"<>]+)/gi;
+const TRAILING_PUNCTUATION_RE = /[.,;:!)\]]+$/;
+
+function scrubEmbeddedQueries(text: string): string {
+  if (!text.includes("://") || !text.includes("?")) return text;
+  return text.replace(EMBEDDED_URL_QUERY_RE, (_match: string, base: string, query: string) => {
+    const trail = TRAILING_PUNCTUATION_RE.exec(query)?.[0] ?? "";
+    const params = trail ? query.slice(0, -trail.length) : query;
+    return `${base}?${scrubQuery(params)}${trail}`;
+  });
 }
 
 export function scrubString(value: string): string {
@@ -286,6 +315,10 @@ function scrubAttribute(key: string, value: unknown): unknown {
   if (isSecretKey(key)) return MASK;
   if (typeof value === "string") {
     if (URL_ATTRIBUTES.has(key)) return scrubUrl(value);
+    if (ERROR_MESSAGE_ATTRIBUTES.has(key)) {
+      const scrubbed = scrubValue(value);
+      return scrubEmbeddedQueries(typeof scrubbed === "string" ? scrubbed : value);
+    }
     if (QUERY_ATTRIBUTES.has(key)) return scrubString(scrubQuery(value));
   }
   return scrubValue(value, HEADER_ATTRIBUTES.has(key));
@@ -302,7 +335,7 @@ export function scrubSecrets(envelope: TraceEnvelope): TraceEnvelope {
   if (typeof envelope.operation === "string") envelope.operation = scrubString(envelope.operation);
   if (typeof envelope.prompt === "string") envelope.prompt = scrubString(envelope.prompt);
   if (typeof envelope.completion === "string") envelope.completion = scrubString(envelope.completion);
-  if (typeof envelope.statusMessage === "string") envelope.statusMessage = scrubString(envelope.statusMessage);
+  if (typeof envelope.statusMessage === "string") envelope.statusMessage = scrubErrorMessage(envelope.statusMessage);
   scrubAttributes(envelope.attributes as Record<string, unknown> | undefined);
   for (const event of envelope.events ?? []) {
     scrubAttributes(event.attributes as Record<string, unknown> | undefined);

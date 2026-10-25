@@ -1,9 +1,11 @@
 import { trace, context as otelContext, SpanKind, SpanStatusCode } from '@opentelemetry/api';
+import { recordError } from '../../core/exceptions.js';
 import type { EvalKitClient } from '../../core/client.js';
 import { sanitizeHeaders } from '../../utils/headers.js';
 import { _evalkitAxiosSpanMap } from '../../utils/axios-span-map.js';
 import { clientSpanName } from '../../utils/http-route.js';
-import { isHealthCheck } from '../../utils/health-check.js';
+import { isIgnoredUrl } from '../../core/ignore.js';
+import { tracingSuppressed } from '../../core/suppress.js';
 
 const INGEST_RE = /\/v1\/ingest/;
 
@@ -36,12 +38,13 @@ export function patchAxios(client: EvalKitClient, axiosInstance: any): void {
 
   axiosInstance.interceptors.request.use((config: any) => {
     const url = (config.baseURL ? config.baseURL.replace(/\/$/, '') : '') + (config.url ?? '');
-    if (INGEST_RE.test(url) || isHealthCheck(url)) return config;
+    const method = (config.method ?? 'get').toUpperCase();
+    // An ignored URL, a health probe or a call made inside an untraced scope goes out as without the SDK.
+    if (INGEST_RE.test(url) || isIgnoredUrl(url, method) || tracingSuppressed()) return config;
 
     const activeSpan = trace.getActiveSpan();
     if (!activeSpan?.isRecording()) return config;
 
-    const method = (config.method ?? 'get').toUpperCase();
     const reqHeaders = sanitizeHeaders(config.headers ?? {});
     const reqHeadersStr = Object.keys(reqHeaders).length ? safeStringify(reqHeaders) : undefined;
     const reqBody = captureBody(config.data, client.options.maxBodyBytes);
@@ -100,8 +103,7 @@ export function patchAxios(client: EvalKitClient, axiosInstance: any): void {
           ...(respHeadersStr ? { 'http.response.headers': respHeadersStr } : {}),
           ...(errBody !== undefined ? { 'http.response.body': errBody } : {}),
         });
-        span.recordException(err instanceof Error ? err : new Error(String(err)));
-        span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+        recordError(span, err instanceof Error ? err : new Error(String(err)), { escaped: true });
         span.end();
       }
       throw err;

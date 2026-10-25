@@ -11,6 +11,9 @@ import { setFrameworkModelRunClaimer } from "../../../core/framework-model-call.
 import type { FrameworkModelRun } from "../../../core/framework-model-call.js";
 import { takeGraphRoot } from "./langgraph.js";
 import { beforeFlush } from "../../../core/flush-hooks.js";
+import { boundedText, safeString } from "../../../core/serialize.js";
+import { BoundedMap } from "../../../utils/bounded-map.js";
+import { recordError } from "../../../core/exceptions.js";
 
 function loadLangChainModule(specifier: string): any {
   try {
@@ -23,11 +26,19 @@ function loadLangChainModule(specifier: string): any {
 const ATTR_MAX = 4096;
 
 function truncate(v: unknown, limit = ATTR_MAX): string {
-  let s: string;
-  try { s = typeof v === "string" ? v : JSON.stringify(v); } catch { s = String(v); }
-  if (s === undefined || s === null) return "";
-  return s.length > limit ? s.slice(0, limit) + "…" : s;
+  if (typeof v === "string") return v.length > limit ? v.slice(0, limit) + "…" : v;
+  try {
+    return boundedText(v, limit) ?? "";
+  } catch {
+    const s = safeString(v);
+    return s.length > limit ? s.slice(0, limit) + "…" : s;
+  }
 }
+
+// Runs are kept from their start callback to their end callback. A run whose end LangChain never reports (a
+// callback that threw, a graph abandoned mid-step) would otherwise stay for the life of the process.
+const MAX_OPEN_RUNS = 10_000;
+const RUN_TTL_MS = 60 * 60_000;
 
 function providerFrom(serialized: any): string | undefined {
   const id = serialized?.id;
@@ -155,7 +166,7 @@ type PendingModelRun = {
   claimed: boolean;
 };
 
-const openModelRuns = new Map<string, PendingModelRun>();
+const openModelRuns = new BoundedMap<string, PendingModelRun>(MAX_OPEN_RUNS, RUN_TTL_MS);
 
 const LC_STORAGE = Symbol.for("ls:tracing_async_local_storage");
 const LC_CHILD_CONFIG = Symbol.for("lc:child_config");
@@ -175,7 +186,7 @@ function currentLangChainParentRunId(): string | undefined {
 function claimOpenModelRun(): FrameworkModelRun | undefined {
   if (openModelRuns.size === 0) return undefined;
   const parent = currentLangChainParentRunId();
-  const open = [...openModelRuns.values()].filter((run) => !run.claimed);
+  const open = openModelRuns.values().filter((run) => !run.claimed);
   const candidates = parent !== undefined ? open.filter((run) => run.parentRunId === parent) : open;
   // Without LangChain's context to tell runs apart, only a single open run is taken.
   if (candidates.length === 0 || (parent === undefined && candidates.length > 1)) return undefined;
@@ -197,11 +208,16 @@ type AdoptedRoot = { span: Span; ctx: OtelContext; open: Set<string>; lastEnd: D
 const UNPARENTED_GRAPH = "\u0000unparented-graph";
 
 export function langchainHandlerMethods(client: EvalKitClient): Record<string, (...args: any[]) => void> {
-  const runs = new Map<string, { span: Span; ctx: OtelContext; owned: boolean; root?: AdoptedRoot }>();
+  const runs = new BoundedMap<string, { span: Span; ctx: OtelContext; owned: boolean; root?: AdoptedRoot }>(MAX_OPEN_RUNS, RUN_TTL_MS);
   // Runs whose parent run started before this handler was attached (in an ES module app, a graph invoked
   // straight after its imports runs before the SDK's patches land) share one root per unseen parent, so a
-  // graph's steps stay one trace.
-  const adopted = new Map<string, AdoptedRoot>();
+  // graph's steps stay one trace. A root that outlives the cap or the TTL is ended where it stands.
+  const adopted = new BoundedMap<string, AdoptedRoot>(MAX_OPEN_RUNS, RUN_TTL_MS, (_id, root) => {
+    if (root.timer) clearTimeout(root.timer);
+    try {
+      root.span.end(root.lastEnd);
+    } catch {  }
+  });
 
   function endAdopted(parentRunId: string, root: AdoptedRoot): void {
     if (root.timer) clearTimeout(root.timer);
@@ -213,7 +229,7 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
   }
 
   beforeFlush(() => {
-    for (const [id, root] of adopted) if (root.open.size === 0) endAdopted(id, root);
+    for (const [id, root] of adopted.entriesList()) if (root.open.size === 0) endAdopted(id, root);
   });
 
   function adoptedRoot(parentRunId: string, inGraph: boolean): AdoptedRoot {
@@ -254,7 +270,7 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
     if (!root || !root.open.delete(runId)) return;
     root.lastEnd = new Date();
     if (root.open.size > 0) return;
-    for (const [id, r] of adopted) {
+    for (const [id, r] of adopted.entriesList()) {
       if (r !== root) continue;
       root.timer = setTimeout(() => endAdopted(id, root), ADOPTED_ROOT_IDLE_MS);
       (root.timer as { unref?: () => void }).unref?.();
@@ -291,7 +307,7 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
     } catch {  }
   }
 
-  function endRun(runId: string, status: "OK" | "ERROR", attrs?: Record<string, string | number | boolean>, message?: string): void {
+  function endRun(runId: string, status: "OK" | "ERROR", attrs?: Record<string, string | number | boolean>, error?: unknown): void {
     try {
       const rec = runs.get(runId);
       if (!rec) return;
@@ -299,7 +315,9 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
       leaveRoot(runId, rec.root);
       if (!rec.owned) return;
       if (attrs) rec.span.setAttributes(attrs);
-      rec.span.setStatus({ code: status === "OK" ? SpanStatusCode.OK : SpanStatusCode.ERROR, message });
+      // A run's error reaches the code that invoked the chain, tool or retriever.
+      if (error !== undefined) recordError(rec.span, error, { escaped: true });
+      else rec.span.setStatus({ code: status === "OK" ? SpanStatusCode.OK : SpanStatusCode.ERROR });
       rec.span.end();
     } catch {  }
   }
@@ -333,7 +351,7 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
     runId: string,
     status: "OK" | "ERROR",
     attrs?: Record<string, string | number | boolean>,
-    message?: string,
+    error?: unknown,
     output?: any,
   ): void {
     try {
@@ -351,7 +369,8 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
       if (output !== undefined) {
         try { emitToolCalls(client, span, fromLangChainResult(output)); } catch {  }
       }
-      span.setStatus({ code: status === "OK" ? SpanStatusCode.OK : SpanStatusCode.ERROR, message });
+      if (error !== undefined) recordError(span, error, { escaped: true });
+      else span.setStatus({ code: status === "OK" ? SpanStatusCode.OK : SpanStatusCode.ERROR });
       span.end();
     } catch {  }
   }
@@ -365,7 +384,7 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
       });
     },
     handleChainEnd(_outputs: any, runId: string) { endRun(runId, "OK"); },
-    handleChainError(err: any, runId: string) { endRun(runId, "ERROR", undefined, String(err?.message ?? err)); },
+    handleChainError(err: any, runId: string) { endRun(runId, "ERROR", undefined, err ?? new Error("chain failed")); },
 
     handleLLMStart(llm: any, prompts: string[], runId: string, parentRunId?: string, extraParams?: any, _tags?: string[], metadata?: any) {
       const model = modelFrom(llm, extraParams);
@@ -406,7 +425,7 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
         ...(respBody ? { "gen_ai.response.body": respBody } : {}),
       }, undefined, output);
     },
-    handleLLMError(err: any, runId: string) { endModelRun(runId, "ERROR", undefined, String(err?.message ?? err)); },
+    handleLLMError(err: any, runId: string) { endModelRun(runId, "ERROR", undefined, err ?? new Error("model call failed")); },
 
     handleToolStart(tool: any, input: string, runId: string, parentRunId?: string, _tags?: string[], metadata?: any, name?: string) {
       const label = name ?? tool?.id?.[tool.id.length - 1] ?? "tool";
@@ -419,7 +438,7 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
       });
     },
     handleToolEnd(output: any, runId: string) { endRun(runId, "OK", { "tool.result": truncate(output) }); },
-    handleToolError(err: any, runId: string) { endRun(runId, "ERROR", undefined, String(err?.message ?? err)); },
+    handleToolError(err: any, runId: string) { endRun(runId, "ERROR", undefined, err ?? new Error("tool failed")); },
 
     handleRetrieverStart(retriever: any, query: string, runId: string, parentRunId?: string, _tags?: string[], metadata?: any) {
       const label = retriever?.id?.[retriever.id.length - 1] ?? "retriever";
@@ -429,7 +448,7 @@ export function langchainHandlerMethods(client: EvalKitClient): Record<string, (
       const count = Array.isArray(documents) ? documents.length : 0;
       endRun(runId, "OK", { "retriever.document_count": count });
     },
-    handleRetrieverError(err: any, runId: string) { endRun(runId, "ERROR", undefined, String(err?.message ?? err)); },
+    handleRetrieverError(err: any, runId: string) { endRun(runId, "ERROR", undefined, err ?? new Error("retriever failed")); },
   };
 }
 

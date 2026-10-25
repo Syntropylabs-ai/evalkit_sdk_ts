@@ -1,5 +1,122 @@
 # Changelog
 
+## 0.3.6 — 2026-10-26
+
+The SDK runs inside the app it traces, and this release makes it unable to crash it, hold it up or grow
+without bound, whatever the receiver does and whatever the app hands it.
+
+### Fixed
+- An export can no longer hang. `fetch` had no timeout, and the retry budget bounded only the waits between
+  attempts, so a receiver that accepted the connection and never answered held the export, and every span
+  queued behind it, forever. Each attempt now has a timeout (10 s, never past the export's 20 s budget), and
+  one export is in flight at a time; an export that arrives while one is busy is dropped and counted.
+- Memory is bounded. The queue held up to 2048 spans of any size; it now also keeps to a byte budget
+  (`maxQueueBytes`, 32 MiB), where the oldest spans that are not model calls make room for a model call and
+  other spans are dropped, both counted. The LangChain run maps keep at most 10,000 runs for at most an hour,
+  as the identity and framework-span maps already did, and the hooks a LangChain handler adds per instance
+  are capped.
+- HTTP bodies are recorded up to 64 KiB by default (`maxBodyBytes`); the default was 10 MB.
+- A request body JSON cannot express no longer fails the request: a BigInt or a circular `req.body` turned
+  an Express request into a 500 in `startHttpTrace`. Bodies, headers, console arguments and a traced
+  function's arguments and results are serialised by a bounded writer that stops at the cap instead of
+  stringifying the whole value, writes a BigInt as its digits, a cycle as `"[Circular]"` and a throwing
+  getter as `"[Unserializable]"`, and never throws.
+- `console.log`, `warn` and `error` capture is guarded, cut to 2000 characters before anything is
+  serialised, and rate limited to 50 a second. A `String(value)` that threw inside it reached the app.
+- A span that is not recording builds none of its attributes, so a sampled-out model call serialises no body.
+- Spans are no longer lost on exit: they are flushed on `beforeExit`, and on `SIGTERM` / `SIGINT` when the
+  app has no listener of its own for the signal, within 3 s and then with the signal's default action. A
+  `once` listener or a library like signal-exit counts as the app's own. A flush on the way out gives up
+  after 5 s and abandons an export whose receiver already failed, and the waits between retries no longer
+  keep an otherwise finished process alive.
+- Big payloads keep their end. `gen_ai.request.body` kept only its first 2 MiB, so a long conversation lost
+  its newest messages. A value past the per-value limit (`maxValueBytes`, 16 MiB, lowered by
+  `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT`) now keeps its start and its end around a `…[cut N bytes]…` marker, and
+  `evalkit.truncated.<attribute>` records its original UTF-8 size. Sizes are measured in UTF-8 bytes, so text
+  that is not ASCII no longer passes the span-size check at up to three times its real size.
+- The Fastify plugin records the error it is given (it ignored it, and ended the span before the error
+  handler set the status), the Nest interceptor records the error a handler fails with (it dropped it, and
+  recorded nothing on Node's http server), and the Koa, Hono and hapi adapters pass theirs on too.
+- A traced generator or async generator is timed over its iteration, with the spans made inside it nested
+  under it; the span ended as soon as the generator object was returned.
+- `captureGlobalErrors: true` no longer changes how the process ends: an uncaught exception the app has no
+  handler for is printed and exits with code 1 again (after its span had up to 2 s to be sent), and an
+  unhandled rejection is raised as one under Node's default `--unhandled-rejections=throw`. It stays off by
+  default.
+- When the SDK attaches to the app's own TracerProvider it registers no OpenTelemetry instrumentations, which
+  wrapped the same libraries a second time and recorded each call twice.
+- Importing the SDK on the Vercel Edge runtime, Cloudflare Workers or in a browser no longer throws. The
+  `edge-light`, `workerd` and `browser` export conditions select a stub with the same API that traces
+  nothing; `new Function` and zlib are no longer touched when the Node entry is imported.
+- Registering the SDK's provider no longer attempts the global registration twice.
+- `traceFunction`, `traceTool`, `traceObject`, `@TraceMethod`, `@Traced`, `startTrace`, `startSpan` and
+  `startHttpTrace` called before `init()` run untraced, with one warning, instead of throwing: a module that
+  wrapped its tools as it was imported, before the entry point called `init()`, failed to load. A wrapper made
+  before `init()` traces once it has run.
+- What a health probe's handler did was still recorded on Node's http server and through the Express, Koa,
+  Hono, Fastify and hapi adapters: only the probe's own span was left out, so each database ping or model call
+  it made became a root trace of its own on every poll. A probe now runs untraced as a whole, with no
+  traceparent on the calls it makes, as it already did through the NestJS adapters and in the Python SDK.
+
+### Added
+- Errors are recorded one way everywhere, shared with the Python SDK and the receiver: status ERROR described
+  as `"<Type>: <message>"`; one `exception` event with `exception.type`, `exception.message` (2 KiB),
+  `exception.stacktrace` (16 KiB, cut in the middle) and `exception.escaped`; and the span attributes
+  `evalkit.exception.frames` (at most 64 frames, innermost first), `evalkit.exception.source`,
+  `evalkit.exception.causes` (`error.cause` chains and `AggregateError.errors`) and, when set,
+  `evalkit.exception.fingerprint`. `error.type`, `error.message`, `error.source` and `error.stack` stay.
+  Exception events from other libraries are held to the same caps. The query strings of URLs inside error
+  messages are scrubbed.
+- `captureException(error)`, `setErrorFingerprint(error, fingerprint)` and `expressErrorHandler()`.
+- `inAppInclude`, `inAppExclude`, `stackTraceLimit` (unset by default; when set, raised only from V8's default) and
+  `sourceMaps` options.
+- A circuit breaker: after 3 export cycles in a row fail for want of the receiver, spans are dropped cheaply
+  for 30 s, doubling up to 5 minutes, and the receiver is tested with one small request before the rest is
+  sent. A refused key is reported clearly the first time; tracing still stops after 3 refusals in a row.
+- `getStats()`: queued, exported and dropped spans by reason, export failures, the last error and the
+  circuit's state.
+- `flush(timeoutMs = 5000)`, which resolves false, never rejects, when the export takes longer.
+- `withLambda(handler)` for AWS Lambda and `flushAfter(schedule)` for Next.js `after()` and `waitUntil`.
+- `sampleRate` (`EVALKIT_SAMPLE_RATE`): keeps that share of traces by trace id, and always every model call,
+  tool call and errored span. The default keeps everything.
+- `maxQueueSize`, `maxQueueBytes`, `maxValueBytes`, `consoleSpanLevel` (`EVALKIT_CONSOLE_SPAN_LEVEL`),
+  `captureConsole` and `exitHooks` (`EVALKIT_EXIT_HOOKS`) options.
+- `EVALKIT_DISABLED=true` and `OTEL_SDK_DISABLED=true` turn the SDK off.
+- Keeping things out of traces, with the same patterns and rules as the Python SDK:
+  - `ignoreRoutes`: inbound requests left out whole, with everything they do (child, function, model,
+    console and outgoing-call spans, and the traceparent those calls would carry). A pattern is an exact path
+    (`"/metrics"`), a glob (`*` one segment, `**` any number), a route template (`"GET /v1/orders/:id"`,
+    `{id}` and `<id>` too) matched against the path and the framework's route when it is known, with an
+    optional leading method, a RegExp tested against the path, or a function of `{ method, path, route }`.
+    A trailing slash and the query string are ignored; paths are case-sensitive and methods are not.
+    Applied by Node's http server instrumentation and the Express, Fastify, NestJS, Koa, Hono and hapi
+    adapters.
+  - `ignoreUrls`: outgoing `http`/`https`, `fetch` and `axios` calls to a matching URL (a full URL or
+    host-and-path glob, a RegExp or a function of `{ method, url, host, path }`) create no span and send no
+    traceparent. A client span another OpenTelemetry instrumentation records for such a URL is not exported.
+  - `ignoreFunctions`: function spans left out by name (`"OrdersService.*"`, `"cache.**"`, a RegExp or a
+    function). An ignored name wins over `traceFunction`, `traceTool`, `@TraceMethod`, `@Traced`,
+    `traceObject` and `enableNestjsAutoTrace`.
+  - `untraced(fn)` and `withoutTracing(() => ...)`: nothing inside is traced, across awaits, timers and
+    generator steps, and a concurrent request is unaffected. Function tracing leaves an `untraced` function
+    as it is.
+  - `traceHealthChecks: true` traces health probes, inbound and outbound, like any request.
+  - `EVALKIT_IGNORE_ROUTES`, `EVALKIT_IGNORE_URLS` and `EVALKIT_IGNORE_FUNCTIONS` add comma-separated
+    patterns to the options. An invalid pattern is skipped with one warning; it never stops `init()`.
+
+### Changed
+- `init()` validates its options. Options that cannot work (no key, a malformed URL, a negative number) leave
+  the SDK off with one warning instead of tracing into failures; numeric options given as numeric text are
+  accepted. A second `init()` with different options warns, naming them.
+- Export failures are printed once, then at most once every 5 minutes with the counts, cut to 200 characters
+  and without response bodies or stacks. OpenTelemetry's own warnings are printed, at most ten a minute,
+  unless the app registered a diag logger of its own.
+- `console.log` outside any span no longer becomes a span of its own; warnings and errors still do.
+  `consoleSpanLevel: "info"` restores it. Inside a span every level is still a log event.
+- The SDK exports through a batch processor of its own instead of OpenTelemetry's BatchSpanProcessor. It
+  honours OTEL_BSP_MAX_QUEUE_SIZE and OTEL_BSP_EXPORT_TIMEOUT as before, and its flush never rejects into a
+  host provider's flush or shutdown.
+
 ## 0.3.5 — 2026-10-14
 
 ### Fixed

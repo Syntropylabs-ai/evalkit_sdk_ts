@@ -1,4 +1,5 @@
 import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opentelemetry/api";
+import { recordError } from '../../../core/exceptions.js';
 import type { Span, Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "../../../core/client.js";
 import { emitToolCalls, fromGoogleParts } from "../_toolcalls.js";
@@ -183,8 +184,7 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
         result = (await otelContext.with(spanCtx, () => original.apply(this, args))) as GenAIResponse;
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
-        span.recordException(error);
-        span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+        recordError(span, error, { escaped: true });
         span.end();
         throw err;
       }
@@ -248,8 +248,7 @@ export function patchGoogleGenAI(client: EvalKitClient, ModelsProto: ModelsProto
         stream = (await otelContext.with(spanCtx, () => original.apply(this, args))) as AsyncIterable<GenAIResponse>;
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
-        span.recordException(error);
-        span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+        recordError(span, error, { escaped: true });
         span.end();
         throw err;
       }

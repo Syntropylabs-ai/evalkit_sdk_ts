@@ -16,6 +16,7 @@ The Python SDK is published on PyPI as [`syntropylabs-evalkit`](https://pypi.org
 - [Framework middleware](#framework-middleware)
 - [Trace your own code](#trace-your-own-code)
 - [Manual spans](#manual-spans)
+- [Keeping things out of traces](#keeping-things-out-of-traces)
 - [Identity](#identity)
 - [Offline evaluation](#offline-evaluation)
 - [Evaluation runs](#evaluation-runs)
@@ -23,7 +24,10 @@ The Python SDK is published on PyPI as [`syntropylabs-evalkit`](https://pypi.org
 - [Prompts](#prompts)
 - [Scenario simulation](#scenario-simulation)
 - [Coding agents](#coding-agents)
+- [Errors](#errors)
+- [Shutdown, serverless and edge runtimes](#shutdown-serverless-and-edge-runtimes)
 - [Privacy: content capture and masking](#privacy-content-capture-and-masking)
+- [Limits, failures and diagnostics](#limits-failures-and-diagnostics)
 - [Configuration](#configuration)
 - [Coexisting with an OpenTelemetry setup you already have](#coexisting-with-an-opentelemetry-setup-you-already-have)
 
@@ -49,7 +53,7 @@ Call `init()` as early as you can, at the top of your entry point and before oth
 | LLM clients | OpenAI, Anthropic, Bedrock, Cohere, Google, Vertex and LangChain |
 | HTTP | `fetch`, `axios` and `node:http`, with method, URL, status and latency |
 | Databases | Postgres, MySQL, MongoDB and Redis, with query text and latency |
-| Inbound | Every incoming HTTP or HTTPS request becomes a root trace, health and readiness probes excepted |
+| Inbound | Every incoming HTTP or HTTPS request becomes a root trace, health and readiness probes and [ignored routes](#keeping-things-out-of-traces) excepted |
 | Your code | Opt-in per function, tool or class, or the whole app on NestJS |
 
 Provider SDKs are optional peer dependencies, so install only the ones you use:
@@ -85,11 +89,13 @@ evalkit.init({ subscriptionKey: process.env.EVALKIT_SUBSCRIPTION_KEY!, serviceNa
 
 const app = express();
 app.use(evalkit.expressMiddleware());
+// ... your routes ...
+app.use(evalkit.expressErrorHandler());   // records the error a route passes to next(err), then hands it on
 ```
 
-The adapters are `expressMiddleware()`, `fastifyPlugin()`, `koaMiddleware()`, `honoMiddleware()`, `hapiPlugin()` and `createNestjsInterceptor()`.
+The adapters are `expressMiddleware()`, `fastifyPlugin()`, `koaMiddleware()`, `honoMiddleware()`, `hapiPlugin()` and `createNestjsInterceptor()`. Each records the error a request fails with on the request's span (see [Errors](#errors)); Express needs `expressErrorHandler()` after the routes for that, since an Express middleware only sees the status code.
 
-Health and readiness probes are not traced, by `init()` or by an adapter, so a load balancer polling every few seconds adds no traces. A probe is a request whose last path segment is `health`, `healthz`, `healthcheck`, `health-check`, `health_check`, `livez`, `readyz` or `startupz`, or whose health segment is followed only by `live`, `liveness`, `ready`, `readiness`, `startup`, `started` or `alive` (`/health/live`, `/actuator/health/readiness`). Segments are matched whole and ignoring case, so `/healthcare` and `/api/health-records` are recorded. Outgoing requests to such paths are not recorded either. The Python SDK decides outgoing requests by the same rule.
+Health and readiness probes are not traced, by `init()` or by an adapter, and neither is anything their handlers do, so a load balancer polling every few seconds adds no traces. `traceHealthChecks: true` traces them like any request. A probe is a request whose last path segment is `health`, `healthz`, `healthcheck`, `health-check`, `health_check`, `livez`, `readyz` or `startupz`, or whose health segment is followed only by `live`, `liveness`, `ready`, `readiness`, `startup`, `started` or `alive` (`/health/live`, `/actuator/health/readiness`). Segments are matched whole and ignoring case, so `/healthcare` and `/api/health-records` are recorded. Outgoing requests to such paths are not recorded either. The Python SDK decides outgoing requests by the same rule.
 
 ### Trace a whole NestJS app
 
@@ -125,6 +131,8 @@ class OrderService {
 export const orders = evalkit.traceObject({ place, cancel }, { prefix: "orders" });
 ```
 
+A traced function that returns a promise is timed until the promise settles, and one that returns a generator or an async generator until the iteration ends: the span covers every step, the spans made inside the generator nest under it, and an error thrown mid-way ends it as failed.
+
 A client-side tool that the model calls shows its output only if you wrap it with `traceTool`, because the SDK sees the model's request, not your function's return value. Server-side tools, such as OpenAI `web_search`, and LangChain tools are traced automatically.
 
 ## Manual spans
@@ -144,7 +152,54 @@ try {
 await evalkit.flush();   // force-flush before process exit
 ```
 
-`flush()` never rejects. It resolves to `true` when the spans were sent, and to `false` when the export failed or `init()` has not run, so an app that awaits it on its way out is never failed by tracing.
+`flush(timeoutMs = 5000)` never rejects. It resolves to `true` when the spans were sent, and to `false` when the export failed, took longer than `timeoutMs` (the export then goes on in the background) or `init()` has not run, so an app that awaits it on its way out is never failed or held up by tracing.
+
+## Keeping things out of traces
+
+Some requests, calls and functions are noise in a trace: a metrics scrape, a call to a cache or a metadata endpoint, a hot helper. Four options and two functions keep them out, with the same patterns and the same rules as the Python SDK.
+
+```ts
+evalkit.init({
+  subscriptionKey: process.env.EVALKIT_SUBSCRIPTION_KEY!,
+  ignoreRoutes: ["/metrics", "/internal/**", "GET /v1/orders/:id/status", /^\/admin\//],
+  ignoreUrls: ["metadata.google.internal", "https://cache.internal.example.com/**", "*.s3.amazonaws.com"],
+  ignoreFunctions: ["CacheService.*", "utils.**.slugify"],
+});
+```
+
+**`ignoreRoutes`** leaves an inbound request out whole: no server span, and nothing it does is recorded, not a child span, a function span, a model call, a database query or a console line, and the calls it makes carry no traceparent. It works as for a health probe, through Node's http server instrumentation and every adapter (Express, Fastify, NestJS, Koa, Hono, hapi). A pattern is one of:
+
+| Pattern | Matches |
+| --- | --- |
+| `"/metrics"` | That path exactly |
+| `"/internal/*"` | One more segment: `/internal/jobs`, not `/internal` or `/internal/a/b` |
+| `"/static/**"` | Any number of segments, none included: `/static`, `/static/css/app.css` |
+| `"/files/*.json"` | A `*` inside a segment matches within that segment |
+| `"GET /v1/orders/:id"` | A route template: `:id`, `{id}` and `<id>` match one segment. Matched against the path, and against the framework's route when it knows it by then (Fastify, NestJS) |
+| `"POST /upload"` | A leading method restricts the pattern to that method; `"* /x"` is any method |
+| `/^\/admin\//` | A RegExp, tested against the path |
+| `({ method, path, route }) => boolean` | A function; `method` is upper case, `path` has no query string, `route` is set when known |
+
+Matching ignores a trailing slash, repeated slashes and the query string. Paths are case-sensitive; methods are not.
+
+**`ignoreUrls`** leaves out outgoing calls through `http`/`https`, `fetch` and `axios`: no span, and no traceparent is added to the request. A pattern is a full URL or a host and path (`"api.example.com"` is every call to that host, `"https://api.example.com/v1/**"` one scheme and path, `"localhost:6333"` one port, `"/v1/ingest"` a path on any host). In a host, `*` is one label and `**` any number (`"*.internal.example.com"`, `"**.example.com"`), and hosts match ignoring case. A RegExp is tested against the whole URL, and a function is given `{ method, url, host, path }`. A client span that another OpenTelemetry instrumentation of yours records for such a URL is not exported either.
+
+**`ignoreFunctions`** leaves out function spans by name: the name given to `traceFunction` or `traceTool`, `Class.method` for `@TraceMethod`, `@Traced` and `enableNestjsAutoTrace`, `prefix.key` for `traceObject`. Names are dotted: `*` is one part and `**` any number (`"OrdersService.*"`, `"cache.**"`). A RegExp is tested against the name, and a function is given the name. **The ignore wins**: a function an `ignoreFunctions` pattern names stays untraced even when you wrap it explicitly.
+
+**An untraced scope** keeps a piece of your own code out, wherever it runs:
+
+```ts
+import { untraced, withoutTracing } from "syntropylabs-evalkit";
+
+const warmCache = untraced(async () => { /* ... */ });       // untraced on every call
+await withoutTracing(() => reindex(documents));               // runs the callback untraced
+```
+
+Nothing inside is traced: auto-instrumented model calls, HTTP calls (which carry no traceparent), database queries, function spans and console lines. The scope is held in the OpenTelemetry context, so it follows the code's own awaits and timers, a generator `untraced` returns is untraced at every step, and a concurrent request is traced as usual. Work the scope starts that runs on after it (a timer, a promise it does not await) stays untraced. `traceFunction` and the other wrappers leave an `untraced` function as it is. Both work before `init()`.
+
+Health probes are left out without any option; **`traceHealthChecks: true`** traces them, inbound and outbound, like any request.
+
+`EVALKIT_IGNORE_ROUTES`, `EVALKIT_IGNORE_URLS` and `EVALKIT_IGNORE_FUNCTIONS` take comma-separated patterns, added to the ones in the options. An invalid pattern (`"metrics"` without its slash, a port that is not a number) is skipped with one warning that names it; it never stops `init()` or the SDK. The patterns are compiled once, by `init()`, so each request costs one pass over them.
 
 ## Identity
 
@@ -688,6 +743,73 @@ A `--tenant` that the key does not belong to reports `read back forbidden at <ur
 
 The `hook` subcommand always exits 0, never writes to stdout, and gives up after 5 seconds, so it cannot block the editor.
 
+## Errors
+
+An error is recorded the same way wherever it happens (a traced function, a model call, a request, a database query) and the same way as by the Python SDK:
+
+| Where | What |
+| --- | --- |
+| Span status | `ERROR`, described as `"<Type>: <message>"` |
+| `exception` event | `exception.type`, `exception.message` (at most 2 KiB), `exception.stacktrace` (at most 16 KiB, cut in the middle so the start and the end stay), `exception.escaped` (`true` when the error propagated out of the span) |
+| `error.type`, `error.message`, `error.source`, `error.stack` | The error's name or class name, message, first own frame and stack (8192 characters at most) |
+| `evalkit.exception.frames` | JSON of at most 64 frames, innermost first: `{"file","line","col","function","module"?,"in_app"}` |
+| `evalkit.exception.source` | `"file:line"` of the innermost in-app frame |
+| `evalkit.exception.causes` | JSON of up to 5 `{"type","message","frames"?}` from the `error.cause` chain and `AggregateError.errors` |
+| `evalkit.exception.fingerprint` | Only when you set one with `setErrorFingerprint()` |
+
+A frame is in-app unless it is Node's own (`node:`, `internal/`) or a dependency's (`node_modules`). `inAppInclude` and `inAppExclude` (substrings or RegExps) change that, the exclusions winning: `inAppInclude: ["node_modules/@acme/"]` counts your own packages. Frames come from `error.stack`; `Error.prepareStackTrace` is never replaced. `stackTraceLimit` (unset by default) raises `Error.stackTraceLimit` from V8's default of 10 when you want deeper stacks; it is process-wide, so every `Error` your app creates then collects more frames. A limit you set yourself is left alone. `sourceMaps: true` maps frames to your TypeScript sources through `process.setSourceMapsEnabled(true)`. Messages and stacks are scrubbed like every other attribute, the query strings of URLs inside them included.
+
+Record an error you handled yourself, and group errors your way:
+
+```ts
+try {
+  await chargeCard(order);
+} catch (err) {
+  evalkit.captureException(err);   // on the active span, or a span of its own; marks it as errored
+  await queueRetry(order);
+}
+
+throw evalkit.setErrorFingerprint(new Error(`timeout after ${ms} ms`), "payments-timeout");
+```
+
+`captureGlobalErrors: true` also records uncaught exceptions and unhandled rejections. It is off by default. The process still ends as it would without the SDK: an uncaught exception your app has no handler for is printed and exits with code 1 once its span had up to 2 s to be sent, and an unhandled rejection is raised as one under Node's default `--unhandled-rejections=throw`. With your own `uncaughtException` handler, your handler decides.
+
+## Shutdown, serverless and edge runtimes
+
+Spans wait in memory for their batch to be exported, so `init()` flushes them as the process exits: on `beforeExit`, and on `SIGTERM` or `SIGINT` when your app has no listener of its own for the signal. The signal is then answered within 3 s by its default action, exactly as without the SDK. When your app listens for the signal itself (a `once` listener and a library such as signal-exit included), your handler decides what happens and the SDK steps aside; call `await evalkit.flush()` in it. A flush on the way out gives up after 5 s, and abandons at once an export whose receiver already failed to answer, so an unreachable receiver never holds the exit up for long. `exitHooks: false` (or `EVALKIT_EXIT_HOOKS=false`) installs none of this.
+
+A serverless function is frozen as soon as it returns, so each invocation flushes before it does:
+
+```ts
+// AWS Lambda
+export const handler = evalkit.withLambda(async (event) => {
+  return { statusCode: 200, body: await answer(event) };
+});   // flushes for at most 2 s, and never past the invocation's remaining time
+
+// Next.js route handlers and server actions: the function stays alive until the flush is done
+import { after } from "next/server";
+evalkit.flushAfter(after);
+// or flush only once the response has been sent
+after(() => evalkit.flush());
+
+// Vercel functions, Cloudflare Workers: hand the flush to waitUntil
+evalkit.flushAfter((task) => ctx.waitUntil(task));
+```
+
+`flushAfter()` starts the flush, passes it to the scheduler you give it, and resolves to whether it succeeded. It never throws: Next.js' `after()` throws outside a request, and the flush then simply runs in the background.
+
+On runtimes without Node's APIs (the Vercel Edge runtime, Cloudflare Workers, browsers) the package's `edge-light`, `workerd` and `browser` export conditions select a stub with the same API that traces nothing, so importing the SDK there never fails. In Next.js, start tracing only in the Node.js runtime:
+
+```ts
+// instrumentation.ts
+export async function register() {
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    const { init } = await import("syntropylabs-evalkit");
+    init({ subscriptionKey: process.env.EVALKIT_SUBSCRIPTION_KEY!, serviceName: "web" });
+  }
+}
+```
+
 ## Privacy: content capture and masking
 
 Two controls work independently. `captureContent` turns payload capture off as a whole, and `mask` edits or drops single spans.
@@ -789,6 +911,28 @@ export EVALKIT_CAPTURE_SECRETS=1
 
 With the scrubber off, credential headers are recorded exactly as they were sent. With it on, which is the default, the values are masked and the header names are kept.
 
+## Limits, failures and diagnostics
+
+The SDK runs inside your app, so it is built never to fail it, hold it up, or grow without bound:
+
+- **Memory.** At most `maxQueueSize` spans (2048) and about `maxQueueBytes` (32 MiB) wait for export. Past either, the oldest spans that are not model calls make room for a model call, and other spans are dropped; both are counted. One attribute value keeps at most `maxValueBytes` (16 MiB, or less when `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` says so), measured in UTF-8 bytes: a longer value keeps its start and its end around a `…[cut N bytes]…` marker, and `evalkit.truncated.<attribute>` records its original size, so a long conversation keeps its newest messages. HTTP bodies are recorded up to `maxBodyBytes` (64 KiB).
+- **Time.** Every export request has a timeout (10 s, and never past the export's 20 s budget), and one export runs at a time. A traced function's arguments and result, request bodies and console messages are serialised only as far as they are kept, so a huge argument costs no more than a small one, and a BigInt, a cycle or a throwing getter never throws into your code.
+- **Failures.** After 3 export cycles in a row fail for want of the receiver, spans are dropped cheaply for 30 s, then one small request tests the receiver; each failed test doubles the wait, up to 5 minutes. A refused subscription key is reported at once, and tracing stops after 3 refusals in a row.
+- **Logging.** The first export failure is printed once, cut to 200 characters, and after that at most one summary every 5 minutes with the counts; nothing prints a response body or a stack. OpenTelemetry's own warnings are printed too, at most ten a minute, unless you registered a `diag` logger of your own.
+- **Console capture.** `console.log`, `warn` and `error` become log events on the active span, at most 50 a second and 2000 characters each. With no span active, only warnings and errors become spans of their own; `consoleSpanLevel` (`"info"`, `"warn"`, `"error"` or `"none"`) moves the line, and `captureConsole: false` turns capture off.
+- **Sampling.** `sampleRate` (default 1, every trace) keeps that share of traces, decided by trace id so a trace is kept or dropped whole. Model calls, tool calls and errored spans are always kept, and a trace the calling service sampled stays sampled.
+
+`evalkit.getStats()` reports what happened to the spans:
+
+```ts
+evalkit.getStats();
+// { queued: 12, queued_bytes: 48213, exported: 10432, dropped_queue_full: 0, dropped_bytes_budget: 0,
+//   dropped_export_failed: 37, sampled_out: 0, export_failures: 2, last_error: "export failed 503: ...",
+//   circuit_state: "closed" }   // or "open", "half_open", "disabled"
+```
+
+`init()` never throws. Options that cannot work (no key, a malformed URL, a negative number) leave the SDK off with one warning, and your app runs as without it. `EVALKIT_DISABLED=true`, or OpenTelemetry's `OTEL_SDK_DISABLED=true`, turns it off on purpose: nothing is patched and nothing is sent. Calling `init()` again replaces the options, with a warning naming the ones that changed.
+
 ## Configuration
 
 | Option | Description |
@@ -798,15 +942,24 @@ With the scrubber off, credential headers are recorded exactly as they were sent
 | `environment` | An environment name recorded on every span, such as `"production"` |
 | `baseUrl` | The trace ingest endpoint. Defaults to the hosted one |
 | `apiUrl` | The control-plane endpoint, used for scenarios and simulation |
-| `maxBodyBytes` | The largest HTTP body captured, 10 MB by default |
+| `maxBodyBytes` | The largest HTTP body captured, 64 KiB by default |
+| `maxValueBytes` | The most one attribute value keeps, in UTF-8 bytes; 16 MiB by default, see [Limits](#limits-failures-and-diagnostics) |
+| `maxQueueSize` / `maxQueueBytes` | The most spans (2048) and memory (32 MiB) waiting for export |
+| `sampleRate` | The share of traces kept, 1 by default; model calls, tool calls and errors are always kept |
+| `consoleSpanLevel` / `captureConsole` | Which console levels become spans of their own (`"warn"` by default) / console capture on or off |
+| `exitHooks` | Flush on `beforeExit`, `SIGTERM` and `SIGINT`. On by default, see [Shutdown](#shutdown-serverless-and-edge-runtimes) |
+| `captureGlobalErrors` | Record uncaught exceptions and unhandled rejections. Off by default, see [Errors](#errors) |
+| `inAppInclude` / `inAppExclude` / `stackTraceLimit` / `sourceMaps` | How stack frames are read, see [Errors](#errors) |
 | `captureContent` | Capture prompts, bodies and arguments. On by default, see [Privacy](#privacy-content-capture-and-masking) |
 | `captureSecrets` | Record credentials instead of masking them. Off by default, see [Privacy](#privacy-content-capture-and-masking) |
 | `mask` | `(envelope) => envelope \| null`, which rewrites or drops each span before export |
 | `exportGzip` | Gzip each export request. On by default. A receiver that refuses compressed requests is sent uncompressed ones from then on |
+| `ignoreRoutes` / `ignoreUrls` / `ignoreFunctions` | Inbound routes, outgoing URLs and function names kept out of traces, see [Keeping things out of traces](#keeping-things-out-of-traces) |
+| `traceHealthChecks` | Trace health and readiness probes like any request. Off by default |
 
 The exported `EvalKitOptions` type has the full set, including `appVersion`, `deviceId`, `debug` and the batch settings.
 
-`EVALKIT_API_URL` overrides the control-plane base URL for `Eval()`, feedback, prompts, `generateScenarios()`, the live simulated user of `simulateUser()` and `evaluateSimulation()`. `EVALKIT_QUIET=1` silences the evaluation-run link, `EVALKIT_CAPTURE_SECRETS=1` turns off secret masking, and `EVALKIT_EXPORT_GZIP=false` sends export requests uncompressed. The `exportGzip` option wins over the variable.
+`EVALKIT_API_URL` overrides the control-plane base URL for `Eval()`, feedback, prompts, `generateScenarios()`, the live simulated user of `simulateUser()` and `evaluateSimulation()`. `EVALKIT_QUIET=1` silences the evaluation-run link, `EVALKIT_CAPTURE_SECRETS=1` turns off secret masking, and `EVALKIT_EXPORT_GZIP=false` sends export requests uncompressed. `EVALKIT_SAMPLE_RATE`, `EVALKIT_CONSOLE_SPAN_LEVEL` and `EVALKIT_EXIT_HOOKS` set `sampleRate`, `consoleSpanLevel` and `exitHooks`; `EVALKIT_IGNORE_ROUTES`, `EVALKIT_IGNORE_URLS` and `EVALKIT_IGNORE_FUNCTIONS` add comma-separated patterns to `ignoreRoutes`, `ignoreUrls` and `ignoreFunctions`; `EVALKIT_DISABLED=true` and `OTEL_SDK_DISABLED=true` turn the SDK off; `OTEL_BSP_MAX_QUEUE_SIZE`, `OTEL_BSP_EXPORT_TIMEOUT` and `OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT` are honoured. An option wins over its variable.
 
 ## Coexisting with an OpenTelemetry setup you already have
 
@@ -826,6 +979,8 @@ sdk.start();
 
 evalkit.init({ subscriptionKey: process.env.EVALKIT_SUBSCRIPTION_KEY!, serviceName: "my-service" });
 ```
+
+Attached to your provider, EvalKit registers no OpenTelemetry instrumentations of its own: your setup already chose its instrumentations, and a second set would wrap the same libraries again and record every call twice.
 
 Start your OpenTelemetry SDK before `init()`. OpenTelemetry JS refuses a second global registration, so whichever side registers second is cut off without an error, and its spans go missing. When your SDK starts first, EvalKit attaches to it. If EvalKit finds a provider it cannot attach to, it warns once and falls back to its own pipeline. EvalKit API spans are still exported then, but the spans from your instrumentation are not.
 

@@ -1,8 +1,12 @@
 import { context as otelContext, trace } from '@opentelemetry/api';
 import type { Context as OtelContext } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
+import { recordError } from '../../core/exceptions.js';
+import { boundedText } from '../../core/serialize.js';
+import { swallow } from '../../core/guard.js';
 import { serverSpanOf, setServerName, setServerRoute } from '../../utils/http-route.js';
-import { isHealthCheck } from '../../utils/health-check.js';
+import { isIgnoredRequest } from '../../core/ignore.js';
+import { tracingSuppressed, untracedRequest } from '../../core/suppress.js';
 
 export interface FastifyPluginOptions {
   name?: string | ((request: any) => string);
@@ -25,9 +29,17 @@ export function createFastifyPlugin(
     fastify.addHook(
       'onRequest',
       (request: any, _reply: any, hookDone: () => void) => {
-        // A health probe is not recorded, as the http server's own instrumentation does not record it.
-        if (isHealthCheck(request.url)) {
+        // Already untraced: the http server left out an ignored route or a probe.
+        if (tracingSuppressed()) {
           hookDone();
+          return;
+        }
+        // A health probe or an ignored route is answered untraced, with everything its handler does. Fastify has
+        // matched the route by now, so a pattern written as the route's template matches too.
+        if (isIgnoredRequest(request.method, request.url, request.routeOptions?.url ?? request.routerPath)) {
+          const quiet = untracedRequest(request.raw);
+          request._evalkitIgnored = quiet;
+          otelContext.with(quiet, hookDone);
           return;
         }
         const routePath =
@@ -78,16 +90,17 @@ export function createFastifyPlugin(
     fastify.addHook(
       'preHandler',
       (request: any, _reply: any, hookDone: () => void) => {
+        if (request._evalkitIgnored) {
+          otelContext.with(request._evalkitIgnored as OtelContext, hookDone);
+          return;
+        }
         if (request._evalkitCtx && request.body !== undefined) {
           const activeSpan = trace.getActiveSpan();
           if (activeSpan?.isRecording()) {
             try {
-              activeSpan.setAttribute(
-                'http.request.body',
-                typeof request.body === 'string'
-                  ? request.body.slice(0, client.options.maxBodyBytes)
-                  : JSON.stringify(request.body).slice(0, client.options.maxBodyBytes),
-              );
+              const max = client.options.maxBodyBytes;
+              const body = typeof request.body === 'string' ? request.body.slice(0, max) : boundedText(request.body, max);
+              if (max > 0 && body !== undefined) activeSpan.setAttribute('http.request.body', body);
             } catch { }
           }
         }
@@ -99,9 +112,14 @@ export function createFastifyPlugin(
       'onSend',
       (request: any, reply: any, payload: any, hookDone: (err: null, payload: any) => void) => {
         try {
-          if (payload !== undefined && payload !== null) {
-            const s = (typeof payload === 'string' ? payload : JSON.stringify(payload)).slice(0, client.options.maxBodyBytes);
-            request._evalkitRespBody = s;
+          const max = client.options.maxBodyBytes;
+          if (payload !== undefined && payload !== null && max > 0 && typeof request._evalkitEnd === 'function') {
+            request._evalkitRespBody = typeof payload === 'string'
+              ? payload.slice(0, max)
+              : Buffer.isBuffer(payload)
+                ? payload.subarray(0, max).toString('utf8')
+                // A stream is sent as it is read; there is nothing to record of it here.
+                : typeof payload.pipe === 'function' ? undefined : boundedText(payload, max);
           }
         } catch {  }
         hookDone(null, payload);
@@ -125,14 +143,33 @@ export function createFastifyPlugin(
 
     fastify.addHook(
       'onError',
-      (request: any, reply: any, _error: Error, hookDone: () => void) => {
-        if (typeof request._evalkitEnd === 'function' && !request._evalkitEnded) {
-          request._evalkitEnded = true;
-          request._evalkitEnd('ERROR', { statusCode: reply.statusCode ?? 500 });
+      (request: any, _reply: any, error: unknown, hookDone: () => void) => {
+        // The error is recorded on the request's span now; the span ends in onResponse, with the status
+        // the error handler answered.
+        try {
+          const span = request._evalkitCtx ? trace.getSpan(request._evalkitCtx as OtelContext) : undefined;
+          recordError(span, error, { escaped: false });
+        } catch (err) {
+          swallow('recording a Fastify error', err);
         }
         hookDone();
       },
     );
+
+    // A request the client gave up on gets no onResponse (Fastify 4.17 and later have this hook).
+    try {
+      fastify.addHook('onRequestAbort', (request: any, hookDone: () => void) => {
+        try {
+          if (typeof request._evalkitEnd === 'function' && !request._evalkitEnded) {
+            request._evalkitEnded = true;
+            request._evalkitEnd('ERROR', { statusCode: 499 });
+          }
+        } catch {  }
+        hookDone();
+      });
+    } catch {
+      // An older Fastify ends such a request in onResponse.
+    }
 
     pluginDone();
   }

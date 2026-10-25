@@ -1,7 +1,10 @@
 import { context as otelContext } from '@opentelemetry/api';
+import type { Span } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
+import { recordError } from '../../core/exceptions.js';
 import { serverRoute, serverSpanOf, setServerRoute } from '../../utils/http-route.js';
-import { isHealthCheck } from '../../utils/health-check.js';
+import { isIgnoredRequest } from '../../core/ignore.js';
+import { tracingSuppressed, untracedRequest } from '../../core/suppress.js';
 import { swallow } from '../../core/guard.js';
 
 export class EvalKitInterceptor {
@@ -28,16 +31,27 @@ export class EvalKitInterceptor {
 
     const req = httpCtx.getRequest();
     const res = httpCtx.getResponse();
-    // A health probe is not recorded, as the http server's own instrumentation does not record it.
-    if (!req || isHealthCheck(req.originalUrl ?? req.url)) return undefined;
+    // Already untraced: the http server left out an ignored route or a probe, or the app's own scope.
+    if (!req || tracingSuppressed()) return undefined;
     // Nest has routed the request by the time an interceptor runs: on Express the route is on the
     // request; on Fastify on `routeOptions.url` (`routerPath` before Fastify 4). The server span the
     // http instrumentation opened for the request is named by it too.
     const fastifyRoute = req.routeOptions?.url ?? req.routerPath;
+    // A health probe or an ignored route: the handler runs untraced, and a server span already open for the
+    // request is not exported.
+    const knownRoute = serverRoute(req) ?? (typeof fastifyRoute === 'string' ? fastifyRoute : undefined);
+    if (isIgnoredRequest(req.method, req.originalUrl ?? req.url, knownRoute)) {
+      const quiet = untracedRequest(req.raw ?? req);
+      const handled = otelContext.with(quiet, () => next.handle());
+      if (!handled || typeof handled.subscribe !== 'function') return handled;
+      return observableLike(handled, (observer: any) => otelContext.with(quiet, () => handled.subscribe(observer)));
+    }
     if (req.raw) setServerRoute(req.raw, fastifyRoute);
     // On Node's http server the request already has that server span, so the interceptor records it once,
-    // as the other adapters do, rather than opening a second span for the same request.
-    if (serverSpanOf(req.raw ?? req)) return undefined;
+    // as the other adapters do, rather than opening a second span for the same request; the error a handler
+    // fails with is recorded on that span.
+    const core = serverSpanOf(req.raw ?? req);
+    if (core) return observeErrors(next.handle(), core.span as unknown as Span);
     const route = serverRoute(req) ?? (typeof fastifyRoute === 'string' ? fastifyRoute : undefined);
     const traceName = `${String(req.method ?? 'GET')} ${String(route ?? req.path ?? req.url ?? '/')}`;
 
@@ -79,13 +93,14 @@ export class EvalKitInterceptor {
 
     const obs$ = otelContext.with(ctx, () => next.handle());
 
-    const safeEnd = (status: 'OK' | 'ERROR', response?: { statusCode?: number; body?: unknown }) => {
+    const safeEnd = (status: 'OK' | 'ERROR', response?: { statusCode?: number; body?: unknown; error?: unknown }) => {
       try { end(status, response); } catch {  }
     };
     const subscribe = (observer: any) => otelContext.with(ctx, () => obs$.subscribe({
       next: (v: any) => observer.next?.(v),
       error: (e: any) => {
-        safeEnd('ERROR');
+        // Nest's exception filters answer it next, so it ends this span as a response, not by escaping it.
+        safeEnd('ERROR', { statusCode: errorStatus(e, res), error: e });
         observer.error?.(e);
       },
       complete: () => {
@@ -102,6 +117,37 @@ export class EvalKitInterceptor {
     }));
 
     return observableLike(obs$, subscribe);
+  }
+}
+
+/** The status Nest answers an error with: an HttpException's own, else 500. */
+function errorStatus(error: any, res: any): number {
+  try {
+    const status = typeof error?.getStatus === 'function' ? error.getStatus() : error?.status ?? error?.statusCode;
+    if (typeof status === 'number' && status >= 100 && status < 600) return status;
+  } catch {
+    // An exception without a readable status is a server error.
+  }
+  const sc = res?.statusCode;
+  return typeof sc === 'number' && sc >= 400 ? sc : 500;
+}
+
+/** The handler's answer as it was, with the error it fails with recorded on `span`. */
+function observeErrors(obs$: any, span: Span): any {
+  try {
+    if (!obs$ || typeof obs$.subscribe !== 'function') return obs$;
+    const subscribe = (observer: any) => obs$.subscribe({
+      next: (v: any) => observer.next?.(v),
+      error: (e: any) => {
+        recordError(span, e, { escaped: false });
+        observer.error?.(e);
+      },
+      complete: () => observer.complete?.(),
+    });
+    return observableLike(obs$, subscribe);
+  } catch (err) {
+    swallow('observing a NestJS handler', err);
+    return obs$;
   }
 }
 

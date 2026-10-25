@@ -1,6 +1,6 @@
 {
   "name": "syntropylabs-evalkit",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "EvalKit TypeScript SDK \u2014 OpenTelemetry-based LLM observability and tracing",
   "license": "Apache-2.0",
   "author": "Syntropy Labs",
@@ -30,9 +30,22 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
+      "edge-light": {
+        "import": "./dist/stub.mjs",
+        "require": "./dist/stub.js"
+      },
+      "workerd": {
+        "import": "./dist/stub.mjs",
+        "require": "./dist/stub.js"
+      },
+      "browser": {
+        "import": "./dist/stub.mjs",
+        "require": "./dist/stub.js"
+      },
       "import": "./dist/index.mjs",
       "require": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
@@ -48,10 +61,10 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsup src/index.ts src/cli/index.ts --format cjs,esm --dts --clean --minify --treeshake --no-sourcemap --external syntropylabs-evalkit",
+    "build": "tsup src/index.ts src/cli/index.ts src/stub.ts --format cjs,esm --dts --clean --minify --treeshake --no-sourcemap --external syntropylabs-evalkit",
     "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node test/autotrace.e2e.mjs && node test/host-otel.e2e.mjs && node test/explicit-provider.e2e.mjs && node test/redaction.e2e.mjs && node test/streaming-ttft.e2e.mjs && node test/stream-failure.e2e.mjs && node test/google-genai-thinking.e2e.mjs && node test/request-tools.e2e.mjs && node test/stream-usage-warning.e2e.mjs && node test/attr-spellings.e2e.mjs && node test/foreign-llm-counted.e2e.mjs && node tests/smoke.cjs && node test/feedback.e2e.mjs && node test/eval.e2e.mjs && node test/collections.e2e.mjs && node test/eval-cli.e2e.mjs && node test/identity.e2e.mjs && node test/sessions-agents.e2e.mjs && node test/coding-cli.e2e.mjs && node test/coding-spans.e2e.mjs && node test/coding-cli-parity.e2e.mjs && node test/prompts.e2e.mjs && node test/secrets.e2e.mjs && node test/export-requests.e2e.mjs && node test/export-retry.e2e.mjs && node test/langgraph-metadata.e2e.mjs && node test/http-route.e2e.mjs && node test/framework-spans.e2e.mjs && node test/live-user.e2e.mjs && node test/content-capture-off.e2e.mjs && node test/stream-tool-calls.e2e.mjs && node test/stream-rules.e2e.mjs && node test/reinit.e2e.mjs && node test/secrets-cut.e2e.mjs && node test/secrets-camel.e2e.mjs && node test/http-body-capture.e2e.mjs && node --expose-gc test/instrumentation-safety.e2e.mjs && node test/flush-failure.e2e.mjs && node test/nest-autotrace-app.e2e.mjs && node test/adapter-single-span.e2e.mjs && node test/health-probes.e2e.mjs && node test/nest-interceptor.e2e.mjs && node test/langgraph-root.e2e.mjs && node test/cjs-same-spans.e2e.cjs",
+    "test": "npm run build && node test/autotrace.e2e.mjs && node test/host-otel.e2e.mjs && node test/explicit-provider.e2e.mjs && node test/redaction.e2e.mjs && node test/streaming-ttft.e2e.mjs && node test/stream-failure.e2e.mjs && node test/google-genai-thinking.e2e.mjs && node test/request-tools.e2e.mjs && node test/stream-usage-warning.e2e.mjs && node test/attr-spellings.e2e.mjs && node test/foreign-llm-counted.e2e.mjs && node tests/smoke.cjs && node test/feedback.e2e.mjs && node test/eval.e2e.mjs && node test/collections.e2e.mjs && node test/eval-cli.e2e.mjs && node test/identity.e2e.mjs && node test/sessions-agents.e2e.mjs && node test/coding-cli.e2e.mjs && node test/coding-spans.e2e.mjs && node test/coding-cli-parity.e2e.mjs && node test/prompts.e2e.mjs && node test/secrets.e2e.mjs && node test/export-requests.e2e.mjs && node test/export-retry.e2e.mjs && node test/langgraph-metadata.e2e.mjs && node test/http-route.e2e.mjs && node test/framework-spans.e2e.mjs && node test/live-user.e2e.mjs && node test/content-capture-off.e2e.mjs && node test/stream-tool-calls.e2e.mjs && node test/stream-rules.e2e.mjs && node test/reinit.e2e.mjs && node test/secrets-cut.e2e.mjs && node test/secrets-camel.e2e.mjs && node test/http-body-capture.e2e.mjs && node --expose-gc test/instrumentation-safety.e2e.mjs && node test/flush-failure.e2e.mjs && node test/nest-autotrace-app.e2e.mjs && node test/adapter-single-span.e2e.mjs && node test/health-probes.e2e.mjs && node test/ignore-patterns.e2e.mjs && node test/ignore.e2e.mjs && node test/nest-interceptor.e2e.mjs && node test/langgraph-root.e2e.mjs && node test/cjs-same-spans.e2e.cjs && node test/hardening-units.e2e.mjs && node test/export-hardening.e2e.mjs && node test/error-capture.e2e.mjs && node test/lifecycle.e2e.mjs && node test/payload-limits.e2e.mjs && node test/edge-stub.e2e.mjs",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

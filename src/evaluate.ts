@@ -245,9 +245,19 @@ export function evaluate(input: OfflineEvalInput): OfflineEvalResult {
   for (const [metric, score] of Object.entries(scores)) {
     spanAttrs[`evalkit.metric.${metric}`] = score as number;
   }
-  void import('./index.js')
-    .then((sdk) => { const { end } = sdk.startSpan('evaluation', spanAttrs); end('OK'); })
-    .catch(() => {  });
+  try {
+    evaluationSpanSink?.(spanAttrs);
+  } catch {
+    // Recording the evaluation is best effort; the scores are the result.
+  }
 
   return result;
+}
+
+// Where an offline evaluation is recorded as a span. The Node entry sets it once tracing is set up; this
+// module stays free of the tracing pipeline, so the runtimes without Node's APIs can score with it too.
+let evaluationSpanSink: ((attributes: Record<string, string | number | boolean>) => void) | undefined;
+
+export function setEvaluationSpanSink(sink: (attributes: Record<string, string | number | boolean>) => void): void {
+  evaluationSpanSink = sink;
 }

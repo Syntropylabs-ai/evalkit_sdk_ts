@@ -1,5 +1,5 @@
 import { context as otelContext, trace as otelTrace } from "@opentelemetry/api";
-import { evaluate as _evaluate } from "./evaluate.js";
+import { evaluate as _evaluate, setEvaluationSpanSink } from "./evaluate.js";
 import { generateScenarios as _generateScenarios, simulateUser as _simulateUser, evaluateSimulation as _evaluateSimulation } from "./simulate.js";
 import { feedback as _feedback, reward as _reward } from "./feedback.js";
 import { Eval as _Eval } from "./eval.js";
@@ -30,7 +30,7 @@ import { patchGoogleGenAI as _patchGoogleGenAI } from "./instrumentation/llm/goo
 import { langchainCallbackHandler as _langchainCallbackHandler } from "./instrumentation/llm/langchain/index.js";
 import { patchAnthropicVertex as _patchAnthropicVertex, patchVertexGenerativeModel as _patchVertexGenerativeModel } from "./instrumentation/llm/vertex-ai/index.js";
 import { createFastifyPlugin } from "./frameworks/fastify/plugin.js";
-import { createExpressMiddleware } from "./frameworks/express/middleware.js";
+import { createExpressErrorHandler, createExpressMiddleware } from "./frameworks/express/middleware.js";
 import { createKoaMiddleware } from "./frameworks/koa/middleware.js";
 import { createHonoMiddleware } from "./frameworks/hono/middleware.js";
 import { createHapiPlugin } from "./frameworks/hapi/plugin.js";
@@ -52,13 +52,25 @@ import { traceOpenAIRealtime as _traceOpenAIRealtime, patchOpenAIRealtime as _pa
 import { setupAutoInstrumentation } from "./instrumentation/auto.js";
 import type { Context as OtelContext } from "@opentelemetry/api";
 import type { EvalKitOptions } from "./core/types.js";
+import { DEFAULT_FLUSH_TIMEOUT_MS } from "./core/client.js";
+import { emptyStats, sdkLog } from "./core/diagnostics.js";
+import type { EvalKitStats } from "./core/diagnostics.js";
+import { recordError, setErrorFingerprint as _setErrorFingerprint } from "./core/exceptions.js";
+import { installExitHooks } from "./core/lifecycle.js";
+import { createFlushAfter, createWithLambda } from "./serverless.js";
+import { tracingSuppressed, untraced as _untraced, withoutTracing as _withoutTracing } from "./core/suppress.js";
+import type { LambdaHandler, WithLambdaOptions } from "./serverless.js";
 
-export type { EvalKitOptions, TraceEnvelope, SpanEvent, MaskHook } from "./core/types.js";
+export type { EvalKitOptions, TraceEnvelope, SpanEvent, MaskHook, ConsoleSpanLevel } from "./core/types.js";
+export type { EvalKitStats, CircuitState } from "./core/diagnostics.js";
+export type { LambdaHandler, WithLambdaOptions } from "./serverless.js";
+export type { HttpTraceResponse } from "./core/client.js";
 export type { FastifyPluginOptions } from "./frameworks/fastify/plugin.js";
 export type { ExpressMiddlewareOptions } from "./frameworks/express/middleware.js";
 export type { KoaMiddlewareOptions } from "./frameworks/koa/middleware.js";
 export type { HonoMiddlewareOptions } from "./frameworks/hono/middleware.js";
 export type { HapiPluginOptions } from "./frameworks/hapi/plugin.js";
+export type { RoutePattern, UrlPattern, FunctionPattern, RouteInfo, UrlInfo } from "./core/ignore.js";
 export { EvalKitClient } from "./core/client.js";
 export { scrubSecrets, isSecretKey } from "./core/secrets.js";
 export { EvalKitInterceptor } from "./frameworks/nestjs/interceptor.js";
@@ -78,6 +90,12 @@ export type { PromptRef } from "./core/prompt-context.js";
 export type { SimContext, AgentTurnResult, GenerateScenariosOptions, SimulateUserOptions, ScenarioRunResult, EvaluateSimulationOptions, EvaluateSimulationResult, SimEvalMetric, SimEvalScenario } from "./simulate.js";
 
 let _instance: EvalKitClient | null = null;
+
+setEvaluationSpanSink((attributes) => {
+  if (!_instance?.enabled) return;
+  const { end } = _instance.startSpan("evaluation", attributes);
+  end("OK");
+});
 
 function getInstance(): EvalKitClient {
   if (!_instance) throw new Error("[evalkit] call evalkit.init() before using the SDK");
@@ -99,11 +117,128 @@ function live(): EvalKitClient {
   return _current;
 }
 
+let warnedBeforeInit = false;
+
+// Code that runs before init() (a module that wraps its tools as it is imported, a test without tracing)
+// runs untraced rather than failing; one line says so.
+function notInitialised(what: string): void {
+  if (warnedBeforeInit) return;
+  warnedBeforeInit = true;
+  sdkLog("warn", `[evalkit] ${what} was called before init(); it runs untraced until init() is called`);
+}
+
+const INVALID_TRACE_ID = "00000000000000000000000000000000";
+
+function untracedHandle(parentCtx?: OtelContext): { traceId: string; end: (...args: any[]) => void; ctx: OtelContext } {
+  return { traceId: INVALID_TRACE_ID, end: () => {}, ctx: parentCtx ?? otelContext.active() };
+}
+
+/** `fn` traced by the client in force at each call; before init() it runs as it is. */
+function tracedLater<T extends (...args: any[]) => any>(make: (client: EvalKitClient) => T, fn: T, what: string): T {
+  if (_instance) return make(_current);
+  notInitialised(what);
+  let traced: T | undefined;
+  return function (this: any, ...args: any[]) {
+    if (!_instance) return fn.apply(this, args);
+    if (!traced) traced = make(_current);
+    return traced.apply(this, args);
+  } as T;
+}
+
+// The options of the init() in force, to tell a repeated init() with other options from a repeated one.
+let _initOptions: EvalKitOptions | undefined;
+
+function changedOptions(before: EvalKitOptions, after: EvalKitOptions): string[] {
+  const keys = new Set([...Object.keys(before ?? {}), ...Object.keys(after ?? {})]);
+  const changed: string[] = [];
+  for (const key of keys) {
+    const a = (before as unknown as Record<string, unknown>)[key];
+    const b = (after as unknown as Record<string, unknown>)[key];
+    if (Object.is(a, b)) continue;
+    if (Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => Object.is(v, b[i]))) continue;
+    changed.push(key);
+  }
+  return changed;
+}
+
+/**
+ * Starts tracing and returns the client. It never throws: options that cannot work (no key, a malformed URL,
+ * a negative number) leave the SDK off with one warning, and EVALKIT_DISABLED=true or OTEL_SDK_DISABLED=true
+ * turn it off on purpose. Called again, the new options replace the old ones; a warning names what changed.
+ */
 export function init(opts: EvalKitOptions): EvalKitClient {
-  if (_instance) void _instance.destroy();
+  if (_instance) {
+    try {
+      // Only a client that was tracing has anything for the new options to replace.
+      const changed = _initOptions && _instance.enabled ? changedOptions(_initOptions, opts) : [];
+      if (changed.length) {
+        sdkLog("warn", `[evalkit] init() was called again with different options (${changed.join(", ")}); the new options replace the old ones`);
+      }
+    } catch {
+      // Comparing options is only for the warning.
+    }
+    void _instance.destroy();
+  }
   _instance = new EvalKitClient(opts);
-  setupAutoInstrumentation(_current);
+  _initOptions = opts;
+  if (_instance.enabled) {
+    setupAutoInstrumentation(_current);
+    try {
+      if (_instance.options.exitHooks) installExitHooks({
+        wanted: () => !!_instance?.enabled && _instance.options.exitHooks !== false,
+        pending: () => (_instance?.getStats().queued ?? 0) > 0,
+        flush: async (timeoutMs) => {
+          try {
+            return _instance ? await _instance.flushForExit(timeoutMs) : false;
+          } catch {
+            return false;
+          }
+        },
+      });
+    } catch {
+      // Without exit hooks the app flushes as it did before.
+    }
+  }
   return _instance;
+}
+
+/**
+ * The span pipeline's counters for the client in force: spans queued, exported and dropped (and why), export
+ * failures, the latest failure and the circuit breaker's state. Before init() everything is zero and the
+ * state is "disabled".
+ */
+export function getStats(): EvalKitStats {
+  try {
+    return _instance ? _instance.getStats() : emptyStats("disabled");
+  } catch {
+    return emptyStats("disabled");
+  }
+}
+
+/**
+ * Records `error` on the active span by the SDK's exception contract and marks the span as errored; with no
+ * span active it is recorded as a span of its own. For an error the app handled itself (`escaped` false, the
+ * default). Never throws, and does nothing before init().
+ */
+export function captureException(error: unknown, options?: { escaped?: boolean; fingerprint?: string }): void {
+  try {
+    if (!_instance?.enabled || tracingSuppressed()) return;
+    const active = otelTrace.getActiveSpan();
+    if (active?.isRecording()) {
+      recordError(active, error, options);
+      return;
+    }
+    const span = _instance.tracer.startSpan("exception", { attributes: { "evalkit.span_type": "log", "log.level": "ERROR" } });
+    recordError(span, error, options);
+    span.end();
+  } catch {
+    // Capturing an error never adds one.
+  }
+}
+
+/** Groups `error` under `fingerprint` wherever it is recorded (`evalkit.exception.fingerprint`); returns the error. */
+export function setErrorFingerprint<T>(error: T, fingerprint: string): T {
+  return _setErrorFingerprint(error, fingerprint);
 }
 
 export function patchOpenAIClient(openaiInstance: any, parentCtx?: OtelContext): void {
@@ -234,6 +369,15 @@ export function expressMiddleware(
   return createExpressMiddleware(live(), options);
 }
 
+/**
+ * Express error-handling middleware that records the error a route passed to `next(err)` (or threw) on the
+ * request's span, then hands it on unchanged. Register it after the routes and before the app's own error
+ * handler: `app.use(evalkit.expressErrorHandler())`.
+ */
+export function expressErrorHandler(): (err: any, req: any, res: any, next: any) => void {
+  return createExpressErrorHandler();
+}
+
 export function fastifyPlugin(
   options?: import("./frameworks/fastify/plugin.js").FastifyPluginOptions,
 ): ReturnType<typeof createFastifyPlugin> {
@@ -266,7 +410,11 @@ export function startTrace(
   name: string,
   attributesOrOptions?: Record<string, string> | StartTraceOptions
 ): { traceId: string; end: (status?: "OK" | "ERROR") => void; ctx: OtelContext } {
-  return getInstance().startTrace(name, attributesOrOptions);
+  if (!_instance) {
+    notInitialised("startTrace()");
+    return untracedHandle();
+  }
+  return _instance.startTrace(name, attributesOrOptions);
 }
 
 export function setUser(identity?: Identity | null): void {
@@ -292,18 +440,37 @@ export function withSession<T>(session: SessionScope, fn: () => T): T {
 }
 
 /**
- * Sends every span ended so far; resolves to false, never rejects, when the export failed. Before init() there
- * is nothing to send and it resolves to false: an app awaits flush() on its way out, often from a module that
- * cannot tell whether tracing was set up (init() guarded on a key that is unset in tests), and tracing must
- * not fail it there.
+ * Sends every span ended so far; resolves to false, never rejects, when the export failed or took longer than
+ * `timeoutMs` (default 5000). Before init() there is nothing to send and it resolves to false: an app awaits
+ * flush() on its way out, often from a module that cannot tell whether tracing was set up (init() guarded on
+ * a key that is unset in tests), and tracing must not fail it there.
  */
-export async function flush(): Promise<boolean> {
+export async function flush(timeoutMs: number = DEFAULT_FLUSH_TIMEOUT_MS): Promise<boolean> {
   try {
-    return _instance ? await _instance.flush() : false;
+    return _instance ? await _instance.flush(timeoutMs) : false;
   } catch {
     return false;
   }
 }
+
+/**
+ * Wraps an AWS Lambda handler so the spans of each invocation are flushed before it returns: a frozen
+ * execution environment exports nothing until the next invocation, which may never come. Works for async
+ * handlers and for callback-style ones; the result and the error are the handler's own.
+ */
+export const withLambda: <H extends LambdaHandler>(handler: H, options?: WithLambdaOptions) => H = createWithLambda(
+  (timeoutMs) => flush(timeoutMs),
+);
+
+/**
+ * Flushes after the response, through the runtime's way of running work past it: Next.js `after`, Vercel's
+ * `waitUntil`, a Cloudflare Worker's `ctx.waitUntil`. `flushAfter(after)` in a route handler or server action;
+ * without one it flushes in the background. Resolves to whether the flush succeeded; never rejects.
+ */
+export const flushAfter: (
+  schedule?: (task: Promise<unknown>) => void,
+  timeoutMs?: number,
+) => Promise<boolean> = createFlushAfter((timeoutMs) => flush(timeoutMs));
 
 export function startHttpTrace(
   name: string,
@@ -311,10 +478,14 @@ export function startHttpTrace(
   attributes?: Record<string, string>
 ): {
   traceId: string;
-  end: (status?: "OK" | "ERROR", response?: { statusCode?: number; body?: unknown; headers?: Record<string, string> }) => void;
+  end: (status?: "OK" | "ERROR", response?: import("./core/client.js").HttpTraceResponse) => void;
   ctx: OtelContext;
 } {
-  return getInstance().startHttpTrace(name, httpCtx, attributes);
+  if (!_instance) {
+    notInitialised("startHttpTrace()");
+    return untracedHandle();
+  }
+  return _instance.startHttpTrace(name, httpCtx, attributes);
 }
 
 export function startSpan(
@@ -322,7 +493,11 @@ export function startSpan(
   attributes?: Record<string, string | number | boolean>,
   parentCtx?: OtelContext
 ): { end: (status?: "OK" | "ERROR", extraAttributes?: Record<string, string | number | boolean>) => void; ctx: OtelContext } {
-  return getInstance().startSpan(name, attributes, parentCtx);
+  if (!_instance) {
+    notInitialised("startSpan()");
+    return untracedHandle(parentCtx);
+  }
+  return _instance.startSpan(name, attributes, parentCtx);
 }
 
 export function traceFunction<T extends (...args: any[]) => any>(
@@ -331,7 +506,7 @@ export function traceFunction<T extends (...args: any[]) => any>(
   attributes?: Record<string, string | number | boolean>,
   captureIO: boolean = true,
 ): T {
-  return live().traceFunction(name, fn, attributes, captureIO);
+  return tracedLater((client) => client.traceFunction(name, fn, attributes, captureIO), fn, "traceFunction()");
 }
 
 export function traceTool<T extends (...args: any[]) => any>(
@@ -340,7 +515,7 @@ export function traceTool<T extends (...args: any[]) => any>(
   attributes?: Record<string, string | number | boolean>,
   captureIO: boolean = true,
 ): T {
-  return live().traceTool(name, fn, attributes, captureIO);
+  return tracedLater((client) => client.traceTool(name, fn, attributes, captureIO), fn, "traceTool()");
 }
 
 export function TraceMethod(name?: string): MethodDecorator {
@@ -349,7 +524,11 @@ export function TraceMethod(name?: string): MethodDecorator {
     const spanName = name ?? `${(target as any).constructor?.name ?? 'unknown'}.${String(key)}`;
     let cached: ((...a: any[]) => any) | undefined;
     descriptor.value = function (this: any, ...args: any[]) {
-      if (!cached) cached = live().traceFunction(spanName, original);
+      if (!_instance) {
+        notInitialised(`@TraceMethod ${spanName}`);
+        return original.apply(this, args);
+      }
+      if (!cached) cached = _current.traceFunction(spanName, original);
       return cached!.apply(this, args);
     };
     return descriptor;
@@ -370,7 +549,11 @@ export function Traced(options?: { prefix?: string }): ClassDecorator {
       Object.defineProperty(proto, key, {
         ...desc,
         value: function (this: any, ...args: any[]) {
-          if (!cached) cached = live().traceFunction(spanName, original);
+          if (!_instance) {
+            notInitialised(`@Traced ${spanName}`);
+            return original.apply(this, args);
+          }
+          if (!cached) cached = _current.traceFunction(spanName, original);
           return cached.apply(this, args);
         },
       });
@@ -383,14 +566,15 @@ export function traceObject<T extends Record<string, any>>(
   obj: T,
   options?: { prefix?: string; captureIO?: boolean },
 ): T {
-  const inst = live();
   const prefix = options?.prefix;
   const captureIO = options?.captureIO ?? true;
   for (const key of Object.keys(obj)) {
     const v = (obj as any)[key];
     if (typeof v === 'function' && !(v as any).__evalkitTraced) {
       const name = prefix ? `${prefix}.${key}` : key;
-      const wrapped = inst.traceFunction(name, v as any, undefined, captureIO);
+      const wrapped = tracedLater((client) => client.traceFunction(name, v as any, undefined, captureIO), v as any, "traceObject()");
+      // A function kept out of traces (ignoreFunctions, untraced()) comes back as it is, and stays unmarked.
+      if (wrapped === v) continue;
       (wrapped as any).__evalkitTraced = true;
       (obj as any)[key] = wrapped;
     }
@@ -453,6 +637,24 @@ export async function enableNestjsAutoTrace(
     console.warn('[evalkit] enableNestjsAutoTrace: skipped:', (e as Error)?.message);
     return 0;
   }
+}
+
+/**
+ * `fn` with nothing traced inside it, on every call: no spans from model calls, outgoing HTTP calls, function
+ * spans or console capture, and no traceparent on the calls it makes. `this`, arguments, result and errors are
+ * fn's own; a returned generator is untraced step by step. Function tracing leaves the wrapper as it is.
+ */
+export function untraced<T extends (...args: any[]) => any>(fn: T): T {
+  try {
+    return _untraced(fn);
+  } catch {
+    return fn;
+  }
+}
+
+/** Runs `fn` with nothing traced inside it (see `untraced`) and returns its result. Works before init(). */
+export function withoutTracing<T>(fn: () => T): T {
+  return _withoutTracing(fn);
 }
 
 export function withTrace<T>(ctx: OtelContext, fn: () => Promise<T>): Promise<T> {
@@ -556,6 +758,7 @@ export default {
   patchOpenAIRealtimeClass,
 
   expressMiddleware,
+  expressErrorHandler,
   fastifyPlugin,
   koaMiddleware,
   honoMiddleware,
@@ -577,6 +780,13 @@ export default {
   Traced,
   enableNestjsAutoTrace,
   withTrace,
+  untraced,
+  withoutTracing,
   currentTraceId,
   flush,
+  flushAfter,
+  withLambda,
+  getStats,
+  captureException,
+  setErrorFingerprint,
 };

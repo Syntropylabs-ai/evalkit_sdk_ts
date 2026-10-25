@@ -1,4 +1,5 @@
 import { trace, context as otelContext, SpanKind, SpanStatusCode } from '@opentelemetry/api';
+import { recordError } from '../../core/exceptions.js';
 import type { EvalKitClient } from '../../core/client.js';
 import { claimPatch } from '../_patched.js';
 
@@ -37,8 +38,7 @@ export function patchMongoose(client: EvalKitClient, mongoose: any): void {
       return result;
     } catch (err: any) {
       const error = err instanceof Error ? err : new Error(String(err));
-      span.recordException(error);
-      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+      recordError(span, error, { escaped: true });
       span.end();
       throw err;
     }

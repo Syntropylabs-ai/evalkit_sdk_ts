@@ -1,11 +1,110 @@
 import { context as otelContext, trace as otelTrace } from '@opentelemetry/api';
+import type { Context as OtelContext, Span } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
 import { extractTraceparent } from '../../core/context.js';
+import { recordError } from '../../core/exceptions.js';
+import { swallow } from '../../core/guard.js';
 import { serverRoute, serverSpanOf, setServerName } from '../../utils/http-route.js';
-import { isHealthCheck } from '../../utils/health-check.js';
+import { isIgnoredRequest } from '../../core/ignore.js';
+import { untracedRequest, tracingSuppressed } from '../../core/suppress.js';
 
 export interface ExpressMiddlewareOptions {
   name?: string | ((req: any) => string);
+}
+
+/**
+ * Starts tracing one request; the context to run the rest of the chain in, or undefined to run it as without
+ * the SDK. Everything the SDK does for the request happens here, so nothing of it can throw into the chain.
+ */
+function traceRequest(client: EvalKitClient, options: ExpressMiddlewareOptions | undefined, req: any, res: any): OtelContext | undefined {
+  // Already untraced (the http server left out an ignored route or a probe, or the app's own untraced scope).
+  if (tracingSuppressed()) return undefined;
+  // A health probe or an ignored route is answered untraced, with everything the chain does for it.
+  if (isIgnoredRequest(req.method, req.originalUrl ?? req.url, serverRoute(req))) return untracedRequest(req);
+  if (req._evalkitCtx || otelTrace.getActiveSpan()?.isRecording()) {
+    if (typeof options?.name === 'string' && serverSpanOf(req)) setServerName(req, options.name);
+    else if (typeof options?.name === 'function' && serverSpanOf(req)) {
+      try { setServerName(req, options.name(req)); } catch {  }
+    }
+    return undefined;
+  }
+  const traceName = typeof options?.name === 'function'
+    ? options.name(req)
+    : (options?.name ?? `${String(req.method)} ${String(req.route?.path ?? req.path ?? req.url)}`);
+
+  const parentCtx = extractTraceparent(req.headers?.['traceparent'] as string | undefined);
+
+  const { end, ctx, traceId } = otelContext.with(parentCtx, () =>
+    client.startHttpTrace(traceName, {
+      method: String(req.method ?? 'GET'),
+      url: String(req.originalUrl ?? req.url ?? '/'),
+      headers: req.headers as Record<string, string>,
+      requestBody: req.body,
+    })
+  );
+
+  (req as any)._evalkitCtx = ctx;
+  (req as any)._evalkitTraceId = traceId;
+
+  try {
+    const spanId = otelTrace.getSpan(ctx)?.spanContext().spanId ?? '0000000000000000';
+    res.setHeader?.('x-trace-id', traceId);
+    res.setHeader?.('traceparent', `00-${traceId}-${spanId}-01`);
+  } catch {
+    // Headers already sent: the trace still records the request.
+  }
+
+  const BODY_MAX = client.options.maxBodyBytes;
+  const bodyChunks: Buffer[] = [];
+  let bodyLen = 0;
+  const captureChunk = (chunk: unknown): void => {
+    if (!chunk || bodyLen >= BODY_MAX) return;
+    try {
+      const b = Buffer.isBuffer(chunk)
+        ? chunk
+        : typeof chunk === 'string'
+          ? Buffer.from(chunk)
+          : null;
+      if (b?.length) { bodyChunks.push(b); bodyLen += b.length; }
+    } catch {  }
+  };
+
+  const origWrite = (res.write as (...args: any[]) => any).bind(res);
+  const origEnd = res.end as (...args: any[]) => any;
+  let ended = false;
+
+  (res as any).write = function (chunk: any, ...rest: any[]) {
+    captureChunk(chunk);
+    return origWrite(chunk, ...rest);
+  };
+
+  res.end = function (...args: any[]) {
+    if (!ended) {
+      ended = true;
+      try {
+        captureChunk(args[0]);
+        const sc = (res.statusCode as number) ?? 200;
+        let responseBody: string | undefined;
+        if (bodyChunks.length) {
+          try {
+            responseBody = Buffer.concat(bodyChunks).subarray(0, BODY_MAX).toString('utf-8');
+          } catch {  }
+        }
+        end(sc >= 400 ? 'ERROR' : 'OK', {
+          statusCode: sc,
+          headers: res.getHeaders ? res.getHeaders() as Record<string, string> : undefined,
+          body: responseBody,
+          // Express matches the route after this middleware ran, so it is read when the response ends.
+          route: options?.name === undefined ? serverRoute(req) : undefined,
+        });
+      } catch (err) {
+        swallow('ending an Express request span', err);
+      }
+    }
+    return origEnd.apply(res, args);
+  };
+
+  return ctx;
 }
 
 export function createExpressMiddleware(
@@ -13,79 +112,41 @@ export function createExpressMiddleware(
   options?: ExpressMiddlewareOptions,
 ): (req: any, res: any, next: any) => void {
   return (req: any, res: any, next: any) => {
-    // A health probe is not recorded, as the http server's own instrumentation does not record it.
-    if (isHealthCheck(req.originalUrl ?? req.url)) return next();
-    if (req._evalkitCtx || otelTrace.getActiveSpan()?.isRecording()) {
-      if (typeof options?.name === 'string' && serverSpanOf(req)) setServerName(req, options.name);
-      else if (typeof options?.name === 'function' && serverSpanOf(req)) {
-        try { setServerName(req, options.name(req)); } catch {  }
-      }
-      return next();
+    let ctx: OtelContext | undefined;
+    try {
+      ctx = traceRequest(client, options, req, res);
+    } catch (err) {
+      swallow('tracing an Express request', err);
+      ctx = undefined;
     }
-    const traceName = typeof options?.name === 'function'
-      ? options.name(req)
-      : (options?.name ?? `${String(req.method)} ${String(req.route?.path ?? req.path ?? req.url)}`);
+    if (ctx) otelContext.with(ctx, () => next());
+    else next();
+  };
+}
 
-    const parentCtx = extractTraceparent(req.headers?.['traceparent'] as string | undefined);
+/** The span recording `req`: the middleware's own, the http server's, or whichever is active. */
+function requestSpan(req: any): Span | undefined {
+  if (req && typeof req === 'object') {
+    const own = req._evalkitCtx ? otelTrace.getSpan(req._evalkitCtx as OtelContext) : undefined;
+    if (own) return own;
+    const core = serverSpanOf(req);
+    if (core) return core.span as unknown as Span;
+  }
+  return otelTrace.getActiveSpan();
+}
 
-    const { end, ctx, traceId } = otelContext.with(parentCtx, () =>
-      client.startHttpTrace(traceName, {
-        method: String(req.method ?? 'GET'),
-        url: String(req.originalUrl ?? req.url ?? '/'),
-        headers: req.headers as Record<string, string>,
-        requestBody: req.body,
-      })
-    );
-
-    (req as any)._evalkitCtx = ctx;
-    (req as any)._evalkitTraceId = traceId;
-
-    const spanId = otelTrace.getSpan(ctx)?.spanContext().spanId ?? '0000000000000000';
-    res.setHeader?.('x-trace-id', traceId);
-    res.setHeader?.('traceparent', `00-${traceId}-${spanId}-01`);
-
-    const BODY_MAX = client.options.maxBodyBytes;
-    const bodyChunks: Buffer[] = [];
-    let bodyLen = 0;
-    const captureChunk = (chunk: unknown): void => {
-      if (!chunk || bodyLen >= BODY_MAX) return;
-      try {
-        const b = Buffer.isBuffer(chunk)
-          ? chunk
-          : typeof chunk === 'string'
-            ? Buffer.from(chunk)
-            : null;
-        if (b?.length) { bodyChunks.push(b); bodyLen += b.length; }
-      } catch {  }
-    };
-
-    const origWrite = (res.write as (...args: any[]) => any).bind(res);
-    const origEnd = res.end as (...args: any[]) => any;
-
-    (res as any).write = function (chunk: any, ...rest: any[]) {
-      captureChunk(chunk);
-      return origWrite(chunk, ...rest);
-    };
-
-    res.end = function (...args: any[]) {
-      captureChunk(args[0]);
-      const sc = (res.statusCode as number) ?? 200;
-      let responseBody: string | undefined;
-      if (bodyChunks.length) {
-        try {
-          responseBody = Buffer.concat(bodyChunks).subarray(0, BODY_MAX).toString('utf-8');
-        } catch {  }
-      }
-      end(sc >= 400 ? 'ERROR' : 'OK', {
-        statusCode: sc,
-        headers: res.getHeaders ? res.getHeaders() as Record<string, string> : undefined,
-        body: responseBody,
-        // Express matches the route after this middleware ran, so it is read when the response ends.
-        route: options?.name === undefined ? serverRoute(req) : undefined,
-      });
-      return origEnd.apply(res, args);
-    };
-
-    otelContext.with(ctx, () => next());
+/**
+ * Records the error a route passed to `next(err)` (or threw) on the request's span by the exception
+ * contract, then passes it on unchanged. Express tells error handlers by their four parameters.
+ */
+export function createExpressErrorHandler(): (err: any, req: any, res: any, next: any) => void {
+  return function evalkitErrorHandler(err: any, req: any, _res: any, next: any): void {
+    try {
+      // The error became a response here, so it did not escape the request's span.
+      recordError(requestSpan(req), err, { escaped: false });
+    } catch (hookErr) {
+      swallow('recording an Express error', hookErr);
+    }
+    next(err);
   };
 }

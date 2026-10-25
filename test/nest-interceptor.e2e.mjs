@@ -1,11 +1,12 @@
 import assert from 'node:assert';
 import { ingestBody } from './_ingest.mjs';
-import { init, createNestjsInterceptor, flush } from '../dist/index.mjs';
+import { init, createNestjsInterceptor, flush, startSpan } from '../dist/index.mjs';
 
 // Nest hands an interceptor's answer to rxjs, which takes an Observable or an interop observable and fails
 // the request with a 500 for any other object, even one with subscribe(). The interceptor answers with an
-// Observable of the route handler's own class, or an interop observable, records the request, and passes a
-// health probe through untouched. The Observable below follows rxjs where it matters here.
+// Observable of the route handler's own class, or an interop observable, records the request, and answers a
+// health probe with the handler's own values, run untraced. The Observable below follows rxjs where it matters
+// here.
 
 const ingested = [];
 globalThis.fetch = async (_url, opts) => {
@@ -71,8 +72,10 @@ try {
   const throwing = { switchToHttp() { throw new Error('no http context'); } };
   assert.strictEqual(interceptor.intercept(throwing, { handle: () => broken }), broken, 'an error inside the interceptor passes the handler\'s answer through');
 
-  const probe = new Observable((s) => { s.next('ok'); s.complete(); });
-  assert.strictEqual(interceptor.intercept(request('/health/live', '/health/live'), { handle: () => probe }), probe, 'a health probe passes through untouched');
+  const probe = new Observable((s) => { startSpan('probe.inner').end(); s.next('ok'); s.complete(); });
+  const answered = interceptor.intercept(request('/health/live', '/health/live'), { handle: () => probe });
+  assert.ok(answered instanceof Observable, 'a health probe is answered with an Observable of the handler\'s class');
+  assert.deepStrictEqual(await collect(answered), { values: ['ok'] }, 'a health probe gets the handler\'s answer');
 
   await flush();
   await sleep(200);
@@ -84,6 +87,7 @@ try {
     '/users/9 GET /users/:id OK',
   ], 'one span per request, named by its route, ended once with its outcome');
   assert.ok(!ingested.some((e) => String(e.attributes?.['http.url']).includes('/health')), 'the probe was not recorded');
+  assert.ok(!ingested.some((e) => e.operation === 'probe.inner'), 'nor anything its handler did');
 
   console.log('PASS nest-interceptor.e2e.mjs');
   process.exit(0);

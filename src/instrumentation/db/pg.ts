@@ -1,4 +1,5 @@
 import { trace, context as otelContext, SpanKind, SpanStatusCode } from '@opentelemetry/api';
+import { recordError } from '../../core/exceptions.js';
 import type { EvalKitClient } from '../../core/client.js';
 import { claimPatch } from '../_patched.js';
 
@@ -43,9 +44,7 @@ export function patchPg(client: EvalKitClient, pgInstance: any): void {
       const newArgs = args.slice(0, -1).concat([
         (err: Error | null, result: any) => {
           if (err) {
-            span.recordException(err);
-            span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
-            span.setAttribute('error.message', err.message);
+            recordError(span, err, { escaped: true });
           } else {
             span.setAttribute('db.rows_affected', result?.rowCount ?? 0);
             span.setStatus({ code: SpanStatusCode.OK });
@@ -67,9 +66,7 @@ export function patchPg(client: EvalKitClient, pgInstance: any): void {
       },
       (err: any) => {
         const error = err instanceof Error ? err : new Error(String(err));
-        span.recordException(error);
-        span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-        span.setAttribute('error.message', error.message);
+        recordError(span, error, { escaped: true });
         span.end();
         throw err;
       },

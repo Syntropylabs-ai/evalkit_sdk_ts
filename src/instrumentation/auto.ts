@@ -331,6 +331,10 @@ let registered: { instrumentations: unknown[]; provider: TracerProvider } | unde
 let registering: Promise<void> | undefined;
 
 async function tryRegisterOtelInstrumentations(client: EvalKitClient): Promise<void> {
+  // An app with an OpenTelemetry setup of its own registered its instrumentations already, or chose not to;
+  // a second set would wrap the same libraries again and record each call twice. Its spans reach EvalKit
+  // through the processor attached to its provider.
+  if (client.tracingMode !== "owned") return;
   if (registering) {
     await registering;
     repointInstrumentations(client.provider);
@@ -504,10 +508,11 @@ async function tryPatchAssemblyAIAsync(client: EvalKitClient): Promise<void> {
 export function setupAutoInstrumentation(client: EvalKitClient): void {
   try { patchIncomingHttp(client); } catch {}
   try { patchHttp(client); } catch {}
-  patchFetch();
-  tryPatchAxios(client);
-  patchConsole(client);
-  patchErrors(client);
+  try { patchFetch(); } catch {}
+  try { tryPatchAxios(client); } catch {}
+  // Patched on the first init() that captures the console; each call reads the options in force.
+  try { if (client.options.captureConsole !== false) patchConsole(client); } catch {}
+  try { patchErrors(client); } catch {}
   Promise.all([
     tryPatchOpenAIAsync(client),
     tryPatchAnthropicAsync(client),

@@ -1,4 +1,5 @@
 import { SpanKind, SpanStatusCode, context as otelContext, trace } from "@opentelemetry/api";
+import { recordError } from '../core/exceptions.js';
 import type { EvalKitClient } from "../core/client.js";
 import { claimPatch } from "./_patched.js";
 
@@ -75,8 +76,7 @@ export function patchMcp(client: EvalKitClient, target: any): void {
     } catch (err) {
       try {
         const e = err instanceof Error ? err : new Error(String(err));
-        span.recordException(e);
-        span.setStatus({ code: SpanStatusCode.ERROR, message: e.message });
+        recordError(span, e, { escaped: true });
       } catch {  }
       span.end();
       throw err;

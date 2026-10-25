@@ -1,5 +1,6 @@
 import { MASK } from "../utils/headers.js";
-import { isSecretName, scrubbedJson, scrubString } from "./secrets.js";
+import { isSecretName, scrubString } from "./secrets.js";
+import { boundedJson, safeString } from "./serialize.js";
 
 /** The most of a function's arguments or result one attribute records. */
 export const IO_MAX = 4096;
@@ -145,24 +146,16 @@ export class FunctionIO {
 }
 
 /**
- * A recorded value as JSON cut to `limit`. With `scrub`, secrets are masked in the whole value first: cut
+ * A recorded value as JSON cut to `limit`, written only as far as the limit: a large argument costs the call
+ * no more than what is kept. With `scrub`, secrets are masked as each part is written, before any cut: cut
  * JSON no longer parses, and the scrubber at export could then recognise a credential only by its shape.
  */
 export function ioString(value: unknown, scrub: boolean, limit: number = IO_MAX): string | undefined {
   if (value === undefined) return undefined;
-  let s: string | undefined;
-  try {
-    s = scrub ? scrubbedJson(value) : JSON.stringify(value);
-  } catch {
-
-  }
-  if (s === undefined) {
-    try {
-      s = String(value);
-    } catch {
-      s = "<unserializable>";
-    }
-    if (scrub) s = scrubString(s);
-  }
+  const json = boundedJson(value, limit, scrub);
+  if (json) return json.cut ? json.text + "…" : json.text;
+  let s = safeString(value);
+  if (s.length > limit + 1024) s = s.slice(0, limit + 1024);
+  if (scrub) s = scrubString(s);
   return s.length > limit ? s.slice(0, limit) + "…" : s;
 }

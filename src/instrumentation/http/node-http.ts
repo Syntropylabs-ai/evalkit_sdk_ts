@@ -1,4 +1,5 @@
 import * as http from 'http';
+import { hasRecordedError, recordError } from '../../core/exceptions.js';
 import * as https from 'https';
 import { trace, context as otelContext, SpanKind, SpanStatusCode } from '@opentelemetry/api';
 import type { Span } from '@opentelemetry/api';
@@ -7,7 +8,8 @@ import { requireBuiltin } from '../../utils/dynimport.js';
 import { sanitizeHeaders } from '../../utils/headers.js';
 import { _evalkitAxiosSpanMap } from '../../utils/axios-span-map.js';
 import { clientSpanName, markServerSpan, serverName, serverRoute } from '../../utils/http-route.js';
-import { isHealthCheck } from '../../utils/health-check.js';
+import { isIgnoredRequest, isIgnoredUrl } from '../../core/ignore.js';
+import { suppressedContext, tracingSuppressed } from '../../core/suppress.js';
 import { claimPatch } from '../_patched.js';
 import { swallow } from '../../core/guard.js';
 
@@ -18,8 +20,15 @@ const SKIP_PATTERNS = [
   /storage\.googleapis/,
 ];
 
-function shouldSkip(url: string): boolean {
-  return SKIP_PATTERNS.some((p) => p.test(url)) || isHealthCheck(url);
+// Calls that are never the app's own: the export itself, and the cloud metadata and storage endpoints the
+// runtime polls.
+function isPlumbing(url: string): boolean {
+  return SKIP_PATTERNS.some((p) => p.test(url));
+}
+
+/** An outgoing call recorded as nothing at all: no span, and no traceparent sent with it. */
+function shouldSkip(url: string, method?: string): boolean {
+  return isPlumbing(url) || isIgnoredUrl(url, method) || tracingSuppressed();
 }
 
 function extractUrlMethod(
@@ -96,7 +105,7 @@ export function patchHttp(client: EvalKitClient): void {
       const options = typeof optionsOrCallback === 'function' ? undefined : optionsOrCallback;
       const { url, method } = extractUrlMethod(input, options, scheme);
 
-      if (shouldSkip(url)) {
+      if (shouldSkip(url, method)) {
         return callOriginal();
       }
 
@@ -184,10 +193,9 @@ function observeClientRequest(req: http.ClientRequest, span: Span): void {
             });
             span.setStatus({ code: sc >= 400 ? SpanStatusCode.ERROR : SpanStatusCode.OK });
           } else {
-            const err = args[0] instanceof Error ? args[0] : new Error(String(args[0]));
-            span.setAttributes({ 'http.status_code': 0, 'error.message': err.message });
-            span.recordException(err);
-            span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
+            const err = args[0];
+            span.setAttribute('http.status_code', 0);
+            recordError(span, err, { escaped: true });
           }
           span.end();
         } catch {  }
@@ -222,7 +230,22 @@ function patchServerPrototype(client: EvalKitClient, proto: http.Server): void {
     const res = args[1] as http.ServerResponse;
     const url = req.url ?? '/';
 
-    if (shouldSkip(url)) return origEmit.call(this, event, ...args);
+    if (isPlumbing(url) || tracingSuppressed()) return origEmit.call(this, event, ...args);
+
+    // A health probe or an ignored route is answered untraced, and so is everything its handlers do: in a
+    // context with tracing suppressed, which the framework's handlers and their awaits inherit.
+    let ignored = false;
+    try {
+      ignored = isIgnoredRequest(req.method, url);
+    } catch {
+      ignored = false;
+    }
+    if (ignored) {
+      let quiet: ReturnType<typeof otelContext.active> | undefined;
+      try { quiet = suppressedContext(); } catch {  }
+      if (quiet) return otelContext.with(quiet, () => origEmit.call(this, event, ...args));
+      return origEmit.call(this, event, ...args);
+    }
 
     if (trace.getActiveSpan()?.isRecording()) return origEmit.call(this, event, ...args);
 
@@ -315,10 +338,9 @@ function patchServerPrototype(client: EvalKitClient, proto: http.Server): void {
             } catch {  }
           }
           if (err) {
-            span.setAttribute('error.message', err.message);
-            span.recordException(err);
-            span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
-          } else {
+            recordError(span, err, { escaped: false });
+          } else if (!hasRecordedError(span)) {
+            // An error a framework adapter recorded keeps its description.
             span.setStatus({ code: res.statusCode >= 400 ? SpanStatusCode.ERROR : SpanStatusCode.OK });
           }
           span.end();
@@ -356,7 +378,7 @@ function patchServerPrototype(client: EvalKitClient, proto: http.Server): void {
 function observeRequestBody(
   req: http.IncomingMessage,
   max: number,
-  span: { setAttribute: (key: string, value: string) => unknown },
+  span: { setAttribute: (key: string, value: string) => unknown; isRecording?: () => boolean },
 ): { record: () => void } {
   const chunks: Buffer[] = [];
   let length = 0;
@@ -364,6 +386,8 @@ function observeRequestBody(
   const record = (): void => {
     if (recorded || !chunks.length) return;
     recorded = true;
+    // A body read only after the response was sent comes too late for its span.
+    if (span.isRecording?.() === false) return;
     try {
       const raw = Buffer.concat(chunks).subarray(0, max).toString('utf-8');
       if (raw) span.setAttribute('http.request.body', raw);
@@ -437,15 +461,14 @@ export function patchFetch(): void {
     callOriginal: (sentInit: RequestInit | undefined) => Promise<Response>,
   ): Promise<Response> {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-    if (shouldSkip(url)) return callOriginal(init);
-
-    const activeSpan = trace.getActiveSpan();
-    if (!activeSpan?.isRecording()) return callOriginal(init);
-
     // A Request carries its own method and headers; headers given in `init` replace the Request's whole,
     // so the added traceparent must travel with the Request's headers when `init` has none of its own.
     const request = typeof input === 'object' && !(input instanceof URL) ? (input as Request) : undefined;
     const method = (init?.method ?? request?.method ?? 'GET').toUpperCase();
+    if (shouldSkip(url, method)) return callOriginal(init);
+
+    const activeSpan = trace.getActiveSpan();
+    if (!activeSpan?.isRecording()) return callOriginal(init);
 
     let modifiedInit: RequestInit | undefined = init;
     const rawHeaders: Record<string, string> = {};
@@ -487,8 +510,8 @@ export function patchFetch(): void {
       try {
         activeSpan.addEvent('http.fetch.error', {
           'http.url': url,
-          'error.message': err?.message ?? String(err),
-          'error.stack': err?.stack ?? '',
+          'error.message': String(err?.message ?? err).slice(0, 2048),
+          'error.stack': String(err?.stack ?? '').slice(0, 8192),
         });
       } catch {  }
       throw err;

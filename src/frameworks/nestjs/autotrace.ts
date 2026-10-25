@@ -1,7 +1,6 @@
-import { context as otelContext } from '@opentelemetry/api';
-import { suppressTracing } from '@opentelemetry/core';
 import type { EvalKitClient } from '../../core/client.js';
-import { isHealthCheck } from '../../utils/health-check.js';
+import { isUntracedProbe } from '../../core/ignore.js';
+import { isUntracedFunction, untraced } from '../../core/suppress.js';
 
 const SKIP = new Set([
   'constructor',
@@ -63,27 +62,10 @@ function isProbeHandler(controller: unknown, handler: unknown): boolean {
     if (!own.length) return false;
     const bases = metadataPaths(R.getMetadata(PATH_METADATA, controller));
     const paths = (bases.length ? bases : ['/']).flatMap((base) => own.map((path) => `/${base}/${path}`));
-    return paths.every((path) => isHealthCheck(path));
+    return paths.every((path) => isUntracedProbe(path));
   } catch {
     return false;
   }
-}
-
-/**
- * A probe handler runs with tracing suppressed. The probe's request is not recorded, so each span opened inside
- * it, by a traced service it calls or a model or database call, would be a trace of its own on every poll. The
- * suppression lasts as long as the handler's own work.
- */
-function untraced(fn: (...args: unknown[]) => unknown): (...args: unknown[]) => unknown {
-  return function (this: unknown, ...args: unknown[]) {
-    let ctx: ReturnType<typeof otelContext.active>;
-    try {
-      ctx = suppressTracing(otelContext.active());
-    } catch {
-      return fn.apply(this, args);
-    }
-    return otelContext.with(ctx, fn, this, ...args);
-  };
 }
 
 export function autoTraceNest(
@@ -115,8 +97,13 @@ export function autoTraceNest(
       if ((desc.value as { __evalkitTraced?: boolean }).__evalkitTraced) continue;
 
       const original = desc.value as (...args: unknown[]) => unknown;
+      if (isUntracedFunction(original)) continue;
+      // A probe handler runs untraced. The probe's request is not recorded, so each span opened inside it, by a
+      // traced service it calls or a model or database call, would be a trace of its own on every poll.
       const probe = isProbeHandler(instance.constructor, original);
       const traced = probe ? untraced(original) : client.traceFunction(`${className}.${name}`, original, undefined, captureIO);
+      // A method `ignoreFunctions` names comes back as it was and is left in place.
+      if (traced === original) continue;
 
       copyReflectMetadata(original, traced);
       try { Object.defineProperty(traced, 'name', { value: name, configurable: true }); } catch {  }

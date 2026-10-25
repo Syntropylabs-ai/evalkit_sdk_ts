@@ -2,7 +2,8 @@ import { context as otelContext } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
 import { extractTraceparent } from '../../core/context.js';
 import { serverSpanOf, setServerName, setServerRoute } from '../../utils/http-route.js';
-import { isHealthCheck } from '../../utils/health-check.js';
+import { isIgnoredRequest } from '../../core/ignore.js';
+import { tracingSuppressed, untracedRequest } from '../../core/suppress.js';
 
 export interface HonoMiddlewareOptions {
   name?: string | ((c: any) => string);
@@ -15,9 +16,11 @@ export function createHonoMiddleware(
   return async (c: any, next: () => Promise<void>) => {
     const req = c.req;
     const url = req.url ?? '/';
-    // A health probe is not recorded, as the http server's own instrumentation does not record it; on a
-    // runtime without Node's http server the middleware is the only place that can tell.
-    if (isHealthCheck(url)) return next();
+    // Already untraced: the http server left out an ignored route or a probe.
+    if (tracingSuppressed()) return next();
+    // A health probe or an ignored route is answered untraced, with everything the rest of the chain does; on
+    // a runtime without Node's http server the middleware is the only place that can tell.
+    if (isIgnoredRequest(req.method, url)) return otelContext.with(untracedRequest(c.env?.incoming), next);
     let pathname = url;
     try { pathname = new URL(url).pathname; } catch { }
 
@@ -62,7 +65,7 @@ export function createHonoMiddleware(
       } catch {  }
       end(sc >= 400 ? 'ERROR' : 'OK', { statusCode: sc, body: responseBody });
     } catch (err: any) {
-      end('ERROR', { statusCode: 500 });
+      try { end('ERROR', { statusCode: 500, error: err, errorEscaped: true }); } catch {  }
       throw err;
     }
   };

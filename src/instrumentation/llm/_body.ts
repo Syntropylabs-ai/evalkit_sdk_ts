@@ -1,15 +1,18 @@
-export function safeBody(obj: unknown, limit = 2 * 1024 * 1024): string | undefined {
+import { boundedText } from "../../core/serialize.js";
+import { valueLimitBytes } from "../../core/truncate.js";
+
+/**
+ * A request or response body as JSON. It is kept whole here: a value past the per-value limit is cut where
+ * it is set on the span, keeping its start and its end, and the span records its original size. A body JSON
+ * cannot express (a cycle, a BigInt) is written as far as it can be.
+ */
+export function safeBody(obj: unknown): string | undefined {
   if (obj == null) return undefined;
-  let s: string;
   try {
-    s = JSON.stringify(obj);
+    const s = JSON.stringify(obj);
+    if (s !== undefined) return s;
   } catch {
-    try {
-      s = String(obj);
-    } catch {
-      return undefined;
-    }
+    // Written by the bounded serialiser below.
   }
-  if (s == null) return undefined;
-  return s.length > limit ? s.slice(0, limit) + "…" : s;
+  return boundedText(obj, valueLimitBytes());
 }
