@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.3.7 — 2026-10-27
+
+Every server integration now decides which answers make a request's span an error by one rule, and the
+rule can be chosen. By default every 4xx and 5xx answer is an error, as before.
+
+### Behaviour changes
+- A route whose last segment names a probe is a health probe, and untraced by default, only when no
+  segment before it names a record: `/health`, `/api/v2/health` and `/actuator/health/readiness` are
+  probes, while `/datasets/<id>/health`, `/users/42/healthz` and a template such as
+  `/datasets/:datasetId/health` are the app's own routes and are recorded. A record is a number, a UUID,
+  a long hex or opaque id, or a route parameter.
+- Node's http server span and every adapter (Express, Fastify, Koa, Hono, hapi, the NestJS interceptor)
+  judge an answer the same way: a request's server span is `ERROR` for an answer in
+  `serverErrorStatusCodes` (every 4xx and 5xx by default), and the exception the app answered with is
+  recorded only then. The error an adapter is handed (by `expressErrorHandler()`, Fastify's `onError`, the
+  NestJS interceptor, or a Koa or Hono handler that throws) is recorded when the response ends. A traced
+  function that throws a framework's HTTP answer (a NestJS `HttpException`, a Hono `HTTPException`, a hapi
+  Boom, an http-errors error) is judged by the status it carries, and records `http.response.status_code`.
+
+### Added
+- `serverErrorStatusCodes`: the answers that make a request's span an error, as codes (`503`) and inclusive
+  ranges (`"500-599"`); `["400-599"]` by default. `["500-599"]` follows OpenTelemetry's HTTP conventions,
+  where a 4xx is the caller's mistake: the span keeps `http.status_code`, stays `OK` and records no
+  exception, so bot scanners' 404s (`GET /.env`), expired tokens' 401s and failed validations' 400s stay out
+  of the error rate and the Errors page. `[429, "500-599"]` also counts the 429s the app answers. It applies
+  to traced functions' HTTP exceptions as well, and never to outgoing calls, where a 4xx is always an error.
+  An invalid list leaves tracing off with one warning, as any invalid option does.
+
+### Fixed
+- Hono on a runtime without Node's http server (Bun, Deno, a fetch handler) held a streamed answer back:
+  the middleware read the whole body to record it before the response reached the client, so server-sent
+  events and streamed model output arrived only once the stream had ended. The body now passes through as
+  it is sent, the span keeps its first `maxBodyBytes`, and the span ends with the last chunk, or when the
+  client goes away.
+- Hono answers what a handler throws through `app.onError` inside `next()`, so the middleware never saw the
+  error. It now records `c.error` when the answer is a server error, on its own span and on Node's http
+  server span.
+- Koa, hapi and Hono name their own span by the route their framework matched (`GET /orders/:id`), as they
+  already named Node's http server span; it kept the raw path, which made every id an operation of its own.
+
 ## 0.3.6 — 2026-10-26
 
 The SDK runs inside the app it traces, and this release makes it unable to crash it, hold it up or grow

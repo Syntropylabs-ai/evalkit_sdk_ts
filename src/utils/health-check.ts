@@ -14,6 +14,18 @@ const PROBE_QUALIFIERS: ReadonlySet<string> = new Set([
   'live', 'liveness', 'ready', 'readiness', 'startup', 'started', 'alive',
 ]);
 
+// A segment that names one record, or a route template's parameter standing for one. A probe never sits under a
+// record, so /datasets/<id>/health is the dataset's own route and is recorded; /api/v2/health is a probe.
+const RECORD_SEGMENT_RES: readonly RegExp[] = [
+  /^\d+$/,
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+  /^(?=[^\d]*\d)[0-9a-f]{12,}$/,
+  /^(?=(?:[^\d]*\d){2})[a-z0-9_-]{16,}$/,
+  /^(?::.+|\{.+\})$/,
+];
+
+const namesRecord = (segment: string): boolean => RECORD_SEGMENT_RES.some((re) => re.test(segment));
+
 // The scheme and authority of an absolute URL; a path whose query holds a URL (/cb?next=http://h/health) is
 // not one.
 const ORIGIN_RE = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*/;
@@ -28,7 +40,7 @@ function pathSegments(url: string): string[] {
 
 /**
  * Whether a URL or a request path is a health or readiness probe: its last path segment names one, or a
- * health segment is followed only by a liveness or readiness qualifier.
+ * health segment is followed only by a liveness or readiness qualifier, and no segment before it names a record.
  */
 export function isHealthCheck(url: unknown): boolean {
   if (typeof url !== 'string' || !url) return false;
@@ -36,8 +48,12 @@ export function isHealthCheck(url: unknown): boolean {
     const segments = pathSegments(url);
     if (!segments.length) return false;
     const last = segments[segments.length - 1];
-    if (PROBE_SEGMENTS.has(last)) return true;
-    return segments.length >= 2 && PROBE_QUALIFIERS.has(last) && PROBE_SEGMENTS.has(segments[segments.length - 2]);
+    let probeAt = -1;
+    if (PROBE_SEGMENTS.has(last)) probeAt = segments.length - 1;
+    else if (segments.length >= 2 && PROBE_QUALIFIERS.has(last) && PROBE_SEGMENTS.has(segments[segments.length - 2])) {
+      probeAt = segments.length - 2;
+    }
+    return probeAt >= 0 && !segments.slice(0, probeAt).some(namesRecord);
   } catch {
     return false;
   }

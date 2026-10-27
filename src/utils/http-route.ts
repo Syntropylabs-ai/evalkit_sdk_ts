@@ -95,3 +95,29 @@ export function serverName(req: unknown): string | undefined {
     return undefined;
   }
 }
+
+const SERVER_ERROR = Symbol.for('evalkit.http.server_error');
+
+/**
+ * The error a framework adapter saw the request's handler fail with, for the server span the http
+ * instrumentation opened. The adapter sees it before the framework has chosen the status it answers with, so
+ * the span records it when it ends, and only when that answer is a server error: an error a framework turns
+ * into a 404 or a 401 is the caller's, and is no failure of the app's.
+ */
+export function setServerError(req: unknown, error: unknown): void {
+  if (!req || typeof req !== 'object' || error === undefined) return;
+  try {
+    Object.defineProperty(req, SERVER_ERROR, { value: error, configurable: true, writable: true });
+  } catch {
+
+  }
+}
+
+export function serverError(req: unknown): unknown {
+  if (!req || typeof req !== 'object') return undefined;
+  try {
+    return (req as Record<symbol, unknown>)[SERVER_ERROR];
+  } catch {
+    return undefined;
+  }
+}

@@ -1,8 +1,7 @@
 import { context as otelContext } from '@opentelemetry/api';
-import type { Span } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
-import { recordError } from '../../core/exceptions.js';
-import { serverRoute, serverSpanOf, setServerRoute } from '../../utils/http-route.js';
+import { isServerErrorStatus, serverSpanStatus, statusOfError } from '../../core/http-status.js';
+import { serverRoute, serverSpanOf, setServerError, setServerRoute } from '../../utils/http-route.js';
 import { isIgnoredRequest } from '../../core/ignore.js';
 import { tracingSuppressed, untracedRequest } from '../../core/suppress.js';
 import { swallow } from '../../core/guard.js';
@@ -49,9 +48,9 @@ export class EvalKitInterceptor {
     if (req.raw) setServerRoute(req.raw, fastifyRoute);
     // On Node's http server the request already has that server span, so the interceptor records it once,
     // as the other adapters do, rather than opening a second span for the same request; the error a handler
-    // fails with is recorded on that span.
-    const core = serverSpanOf(req.raw ?? req);
-    if (core) return observeErrors(next.handle(), core.span as unknown as Span);
+    // fails with goes to that span, which records it if Nest answers it with a server error.
+    const raw = req.raw ?? req;
+    if (serverSpanOf(raw)) return observeErrors(next.handle(), raw);
     const route = serverRoute(req) ?? (typeof fastifyRoute === 'string' ? fastifyRoute : undefined);
     const traceName = `${String(req.method ?? 'GET')} ${String(route ?? req.path ?? req.url ?? '/')}`;
 
@@ -99,8 +98,12 @@ export class EvalKitInterceptor {
     const subscribe = (observer: any) => otelContext.with(ctx, () => obs$.subscribe({
       next: (v: any) => observer.next?.(v),
       error: (e: any) => {
-        // Nest's exception filters answer it next, so it ends this span as a response, not by escaping it.
-        safeEnd('ERROR', { statusCode: errorStatus(e, res), error: e });
+        // Nest's exception filters answer it next, so it ends this span as a response, not by escaping it. An
+        // HttpException answered with a status outside serverErrorStatusCodes (a NotFoundException or a failed
+        // guard, with ["500-599"]) leaves the span OK with the status and no exception.
+        const statusCode = errorStatus(e);
+        const failed = isServerErrorStatus(statusCode);
+        safeEnd(failed ? 'ERROR' : 'OK', { statusCode, ...(failed ? { error: e } : {}) });
         observer.error?.(e);
       },
       complete: () => {
@@ -111,7 +114,7 @@ export class EvalKitInterceptor {
             responseBody = Buffer.concat(bodyChunks).subarray(0, BODY_MAX).toString('utf-8');
           } catch {  }
         }
-        safeEnd(sc >= 400 ? 'ERROR' : 'OK', { statusCode: sc, body: responseBody });
+        safeEnd(serverSpanStatus(sc), { statusCode: sc, body: responseBody });
         observer.complete?.();
       },
     }));
@@ -120,26 +123,22 @@ export class EvalKitInterceptor {
   }
 }
 
-/** The status Nest answers an error with: an HttpException's own, else 500. */
-function errorStatus(error: any, res: any): number {
-  try {
-    const status = typeof error?.getStatus === 'function' ? error.getStatus() : error?.status ?? error?.statusCode;
-    if (typeof status === 'number' && status >= 100 && status < 600) return status;
-  } catch {
-    // An exception without a readable status is a server error.
-  }
-  const sc = res?.statusCode;
-  return typeof sc === 'number' && sc >= 400 ? sc : 500;
+/** The status Nest answers an error with: an HttpException's own (or an error's `statusCode`), else 500. */
+function errorStatus(error: unknown): number {
+  return statusOfError(error) ?? 500;
 }
 
-/** The handler's answer as it was, with the error it fails with recorded on `span`. */
-function observeErrors(obs$: any, span: Span): any {
+/**
+ * The handler's answer as it was, with the error it fails with handed to the server span of `req`, which
+ * records it when the response Nest's exception filters send is a server error.
+ */
+function observeErrors(obs$: any, req: unknown): any {
   try {
     if (!obs$ || typeof obs$.subscribe !== 'function') return obs$;
     const subscribe = (observer: any) => obs$.subscribe({
       next: (v: any) => observer.next?.(v),
       error: (e: any) => {
-        recordError(span, e, { escaped: false });
+        setServerError(req, e);
         observer.error?.(e);
       },
       complete: () => observer.complete?.(),

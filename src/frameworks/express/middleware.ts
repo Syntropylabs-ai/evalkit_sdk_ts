@@ -1,10 +1,11 @@
 import { context as otelContext, trace as otelTrace } from '@opentelemetry/api';
-import type { Context as OtelContext, Span } from '@opentelemetry/api';
+import type { Context as OtelContext } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
 import { extractTraceparent } from '../../core/context.js';
 import { recordError } from '../../core/exceptions.js';
 import { swallow } from '../../core/guard.js';
-import { serverRoute, serverSpanOf, setServerName } from '../../utils/http-route.js';
+import { isServerErrorStatus, serverSpanStatus, statusOfError } from '../../core/http-status.js';
+import { serverError, serverRoute, serverSpanOf, setServerError, setServerName } from '../../utils/http-route.js';
 import { isIgnoredRequest } from '../../core/ignore.js';
 import { untracedRequest, tracingSuppressed } from '../../core/suppress.js';
 
@@ -90,12 +91,15 @@ function traceRequest(client: EvalKitClient, options: ExpressMiddlewareOptions |
             responseBody = Buffer.concat(bodyChunks).subarray(0, BODY_MAX).toString('utf-8');
           } catch {  }
         }
-        end(sc >= 400 ? 'ERROR' : 'OK', {
+        // The error expressErrorHandler() saw is recorded only when it was answered with a server error.
+        const handlerError = isServerErrorStatus(sc) ? serverError(req) : undefined;
+        end(serverSpanStatus(sc), {
           statusCode: sc,
           headers: res.getHeaders ? res.getHeaders() as Record<string, string> : undefined,
           body: responseBody,
           // Express matches the route after this middleware ran, so it is read when the response ends.
           route: options?.name === undefined ? serverRoute(req) : undefined,
+          ...(handlerError !== undefined ? { error: handlerError, errorEscaped: false } : {}),
         });
       } catch (err) {
         swallow('ending an Express request span', err);
@@ -124,26 +128,23 @@ export function createExpressMiddleware(
   };
 }
 
-/** The span recording `req`: the middleware's own, the http server's, or whichever is active. */
-function requestSpan(req: any): Span | undefined {
-  if (req && typeof req === 'object') {
-    const own = req._evalkitCtx ? otelTrace.getSpan(req._evalkitCtx as OtelContext) : undefined;
-    if (own) return own;
-    const core = serverSpanOf(req);
-    if (core) return core.span as unknown as Span;
-  }
-  return otelTrace.getActiveSpan();
-}
-
 /**
- * Records the error a route passed to `next(err)` (or threw) on the request's span by the exception
- * contract, then passes it on unchanged. Express tells error handlers by their four parameters.
+ * Hands the error a route passed to `next(err)` (or threw) to the request's span by the exception contract,
+ * then passes it on unchanged. Express tells error handlers by their four parameters. The status the error is
+ * answered with is chosen after this handler, by the app's own error handlers or Express's (the error's
+ * `status`, else 500), so the span records it when the response ends, and only for a server error: a 404 or a
+ * 401 an error becomes is the caller's.
  */
 export function createExpressErrorHandler(): (err: any, req: any, res: any, next: any) => void {
   return function evalkitErrorHandler(err: any, req: any, _res: any, next: any): void {
     try {
-      // The error became a response here, so it did not escape the request's span.
-      recordError(requestSpan(req), err, { escaped: false });
+      if (req && typeof req === 'object' && (req._evalkitCtx || serverSpanOf(req))) {
+        setServerError(req, err);
+      } else if (isServerErrorStatus(statusOfError(err) ?? 500)) {
+        // A request the SDK does not record: the error goes on the active span, as the status it carries says.
+        // It became a response here, so it did not escape that span.
+        recordError(otelTrace.getActiveSpan(), err, { escaped: false });
+      }
     } catch (hookErr) {
       swallow('recording an Express error', hookErr);
     }

@@ -230,21 +230,22 @@ await check('NestJS: the error a handler fails with is recorded, with and withou
   const failing = (err) => ({ handle: () => ({ subscribe: (o) => { o.error?.(err); return { unsubscribe() {} }; } }) });
   const execution = (req, res) => ({ switchToHttp: () => ({ getRequest: () => req, getResponse: () => res }) });
 
-  // Without Node's http server (a request the interceptor opens its own span for).
-  const notFound = Object.assign(new Error('order 7 not found'), { name: 'NotFoundException', getStatus: () => 404 });
+  // Without Node's http server (a request the interceptor opens its own span for). Nest answers an error that
+  // is not an HttpException with a 500.
+  const broken = Object.assign(new Error('ledger unavailable'), { name: 'LedgerError' });
   let seen;
-  interceptor.intercept(execution({ method: 'GET', url: '/orders/7', headers: {}, route: { path: '/orders/:id' } }, { statusCode: 200 }), failing(notFound))
+  interceptor.intercept(execution({ method: 'GET', url: '/orders/7', headers: {}, route: { path: '/orders/:id' } }, { statusCode: 200 }), failing(broken))
     .subscribe({ error: (e) => { seen = e; } });
-  assert.strictEqual(seen, notFound, 'the error reaches Nest unchanged');
+  assert.strictEqual(seen, broken, 'the error reaches Nest unchanged');
   const own = await oneSpan('GET /orders/:id');
-  assert.strictEqual(own.statusMessage, 'NotFoundException: order 7 not found');
-  assert.strictEqual(own.attributes['http.status_code'], 404);
+  assert.strictEqual(own.statusMessage, 'LedgerError: ledger unavailable');
+  assert.strictEqual(own.attributes['http.status_code'], 500);
 
   // On Node's http server: the error goes on the server span the request already has.
   const server = await listen((req, res) => {
     const nestRequest = { method: req.method, url: req.url, raw: req, routeOptions: { url: '/pay' } };
     interceptor.intercept(execution(nestRequest, res), failing(new TypeError('amount must be positive'))).subscribe({
-      error: () => { res.statusCode = 400; res.end('bad'); },
+      error: () => { res.statusCode = 500; res.end('failed'); },
     });
   });
   await request(server, '/pay');

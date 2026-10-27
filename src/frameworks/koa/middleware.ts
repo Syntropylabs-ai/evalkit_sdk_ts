@@ -2,7 +2,8 @@ import { context as otelContext } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
 import { boundedText } from '../../core/serialize.js';
 import { extractTraceparent } from '../../core/context.js';
-import { serverSpanOf, setServerName, setServerRoute } from '../../utils/http-route.js';
+import { isServerErrorStatus, serverSpanStatus, statusOfError } from '../../core/http-status.js';
+import { serverSpanOf, setServerError, setServerName, setServerRoute } from '../../utils/http-route.js';
 import { isIgnoredRequest } from '../../core/ignore.js';
 import { tracingSuppressed, untracedRequest } from '../../core/suppress.js';
 
@@ -33,6 +34,10 @@ export function createKoaMiddleware(
       if (options?.name !== undefined) setServerName(ctx.req, traceName);
       try {
         await next();
+      } catch (err) {
+        // Koa answers it next, with the status it carries; the server span records it if that is a server error.
+        setServerError(ctx.req, err);
+        throw err;
       } finally {
         setServerRoute(ctx.req, ctx._matchedRoute ?? ctx.routerPath);
       }
@@ -51,6 +56,11 @@ export function createKoaMiddleware(
     );
 
     ctx._evalkitCtx = otelCtx;
+    // A router matches the route inside next(), so the span is named by it as it ends.
+    const routed = (): { route?: string } => {
+      const route = options?.name === undefined ? ctx._matchedRoute ?? ctx.routerPath : undefined;
+      return typeof route === 'string' && route.startsWith('/') ? { route } : {};
+    };
 
     try {
       await otelContext.with(otelCtx, next);
@@ -62,10 +72,16 @@ export function createKoaMiddleware(
           responseBody = typeof b === 'string' ? b.slice(0, client.options.maxBodyBytes) : boundedText(b, client.options.maxBodyBytes);
         }
       } catch {  }
-      end(sc >= 400 ? 'ERROR' : 'OK', { statusCode: sc, body: responseBody });
+      end(serverSpanStatus(sc), { statusCode: sc, body: responseBody, ...routed() });
     } catch (err: any) {
-      // The error propagates to Koa's own handling, out of this middleware's span.
-      try { end('ERROR', { statusCode: ctx.status ?? 500, error: err, errorEscaped: true }); } catch {  }
+      // The error propagates to Koa's own handling, out of this middleware's span. Koa answers it with the
+      // status it carries (`ctx.throw(404)`, an http-errors error), else 500; an answer outside
+      // serverErrorStatusCodes records no exception.
+      try {
+        const statusCode = statusOfError(err) ?? 500;
+        if (isServerErrorStatus(statusCode)) end('ERROR', { statusCode, error: err, errorEscaped: true, ...routed() });
+        else end('OK', { statusCode, ...routed() });
+      } catch {  }
       throw err;
     }
   };

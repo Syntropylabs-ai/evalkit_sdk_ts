@@ -184,4 +184,13 @@ export interface EvalKitOptions {
 
   /** Traces health and readiness probes (/health, /healthz, /readyz, ...) like any request. Default false. */
   traceHealthChecks?: boolean;
+
+  /**
+   * The status codes an incoming request's span is an error for: codes (`503`) and inclusive ranges
+   * (`"500-599"`). Default `["400-599"]`: every 4xx and 5xx answer is an error. `["500-599"]` follows
+   * OpenTelemetry's HTTP conventions instead, where a 4xx answer is the caller's mistake, so its span keeps the
+   * status code, stays OK and records no exception. Outgoing calls are not affected; a 4xx they get back stays
+   * an error.
+   */
+  serverErrorStatusCodes?: Array<number | string>;
 }

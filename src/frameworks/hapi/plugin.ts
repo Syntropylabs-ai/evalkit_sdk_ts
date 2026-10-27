@@ -2,7 +2,8 @@ import { context as otelContext } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
 import { boundedText } from '../../core/serialize.js';
 import { extractTraceparent } from '../../core/context.js';
-import { serverSpanOf, setServerName, setServerRoute } from '../../utils/http-route.js';
+import { isServerErrorStatus, serverSpanStatus } from '../../core/http-status.js';
+import { serverSpanOf, setServerError, setServerName, setServerRoute } from '../../utils/http-route.js';
 import { isIgnoredRequest } from '../../core/ignore.js';
 import { dropSpan, tracingSuppressed } from '../../core/suppress.js';
 
@@ -66,6 +67,9 @@ export function createHapiPlugin(
       server.ext('onPreResponse', (request: any, h: any) => {
         // hapi answers an unmatched request through its own catch-all route, which names nothing.
         if (request.route?.method !== '_special') setServerRoute(request.raw?.req, request.route?.path);
+        // hapi answers a failed handler with a Boom error, which carries the original error's message; the
+        // server span records it if its status is a server error, and a Boom 404 or 401 not at all.
+        if (request.response?.isBoom && serverSpanOf(request.raw?.req)) setServerError(request.raw.req, request.response);
         const entry = requestEndMap.get(request);
         if (entry) {
           const sc = request.response?.output?.statusCode ??
@@ -78,10 +82,16 @@ export function createHapiPlugin(
               responseBody = typeof src === 'string' ? src.slice(0, client.options.maxBodyBytes) : boundedText(src, client.options.maxBodyBytes);
             }
           } catch {  }
-          // hapi answers a failed handler with a Boom error, which carries the original error's message.
-          const error = request.response?.isBoom ? request.response : undefined;
+          const error = request.response?.isBoom && isServerErrorStatus(sc) ? request.response : undefined;
           try {
-            entry.end(sc >= 400 ? 'ERROR' : 'OK', { statusCode: sc, body: responseBody, ...(error ? { error } : {}) });
+            // The span is named by the route hapi matched; its catch-all for an unmatched request names none.
+            const route = options?.name === undefined && request.route?.method !== '_special' ? request.route?.path : undefined;
+            entry.end(serverSpanStatus(sc), {
+              statusCode: sc,
+              body: responseBody,
+              ...(typeof route === 'string' && route.startsWith('/') ? { route } : {}),
+              ...(error ? { error } : {}),
+            });
           } catch {  }
           requestEndMap.delete(request);
         }

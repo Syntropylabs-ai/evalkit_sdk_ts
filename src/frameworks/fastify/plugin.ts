@@ -1,10 +1,10 @@
 import { context as otelContext, trace } from '@opentelemetry/api';
 import type { Context as OtelContext } from '@opentelemetry/api';
 import type { EvalKitClient } from '../../core/client.js';
-import { recordError } from '../../core/exceptions.js';
 import { boundedText } from '../../core/serialize.js';
 import { swallow } from '../../core/guard.js';
-import { serverSpanOf, setServerName, setServerRoute } from '../../utils/http-route.js';
+import { isServerErrorStatus, serverSpanStatus } from '../../core/http-status.js';
+import { serverError, serverSpanOf, setServerError, setServerName, setServerRoute } from '../../utils/http-route.js';
 import { isIgnoredRequest } from '../../core/ignore.js';
 import { tracingSuppressed, untracedRequest } from '../../core/suppress.js';
 
@@ -132,9 +132,12 @@ export function createFastifyPlugin(
         if (typeof request._evalkitEnd === 'function' && !request._evalkitEnded) {
           request._evalkitEnded = true;
           const sc: number = reply.statusCode ?? 200;
-          request._evalkitEnd(sc >= 400 ? 'ERROR' : 'OK', {
+          // The error onError saw is recorded only when the error handler answered it with a server error.
+          const error = isServerErrorStatus(sc) ? serverError(request) : undefined;
+          request._evalkitEnd(serverSpanStatus(sc), {
             statusCode: sc,
             body: request._evalkitRespBody,
+            ...(error !== undefined ? { error, errorEscaped: false } : {}),
           });
         }
         hookDone();
@@ -144,11 +147,11 @@ export function createFastifyPlugin(
     fastify.addHook(
       'onError',
       (request: any, _reply: any, error: unknown, hookDone: () => void) => {
-        // The error is recorded on the request's span now; the span ends in onResponse, with the status
-        // the error handler answered.
+        // Fastify runs onError before its error handler chooses the status, so the error waits for the
+        // response: the request's span records it then, if the answer is a server error. On Node's http server
+        // that span is the server span, which reads it from the raw request.
         try {
-          const span = request._evalkitCtx ? trace.getSpan(request._evalkitCtx as OtelContext) : undefined;
-          recordError(span, error, { escaped: false });
+          if (request._evalkitCtx) setServerError(serverSpanOf(request.raw) ? request.raw : request, error);
         } catch (err) {
           swallow('recording a Fastify error', err);
         }
@@ -162,7 +165,7 @@ export function createFastifyPlugin(
         try {
           if (typeof request._evalkitEnd === 'function' && !request._evalkitEnded) {
             request._evalkitEnded = true;
-            request._evalkitEnd('ERROR', { statusCode: 499 });
+            request._evalkitEnd(serverSpanStatus(499), { statusCode: 499 });
           }
         } catch {  }
         hookDone();

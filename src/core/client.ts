@@ -17,6 +17,12 @@ import type { EvalKitStats } from "./diagnostics.js";
 import { DEFAULT_MAX_QUEUE_BYTES } from "./batch-processor.js";
 import { resolveValueLimitBytes, setValueLimitBytes } from "./truncate.js";
 import { configureIgnore, isIgnoredFunction } from "./ignore.js";
+import {
+  configureServerErrorStatus,
+  DEFAULT_SERVER_ERROR_STATUS_CODES,
+  httpAnswerStatus,
+  isServerErrorStatus,
+} from "./http-status.js";
 import { isUntracedFunction, tracingSuppressed } from "./suppress.js";
 import {
   disabledByEnvironment,
@@ -70,7 +76,7 @@ function definedIdentity(options: Identity): Identity {
   return out;
 }
 
-export const SDK_VERSION = "0.3.6";
+export const SDK_VERSION = "0.3.7";
 
 /** How long flush() waits by default before it resolves false; the export itself goes on in the background. */
 export const DEFAULT_FLUSH_TIMEOUT_MS = 5000;
@@ -284,6 +290,7 @@ export class EvalKitClient {
       ignoreUrls: [],
       ignoreFunctions: [],
       traceHealthChecks: false,
+      serverErrorStatusCodes: [...DEFAULT_SERVER_ERROR_STATUS_CODES],
       ...given,
       captureContent: resolveCaptureContent(given.captureContent),
       captureSecrets: resolveCaptureSecrets(given.captureSecrets),
@@ -318,6 +325,7 @@ export class EvalKitClient {
         } catch (err) {
           swallow("compiling the ignore patterns", err);
         }
+        configureServerErrorStatus(this.options.serverErrorStatusCodes);
         try {
           configureExceptions({
             inAppInclude: this.options.inAppInclude,
@@ -620,6 +628,20 @@ export class EvalKitClient {
         try { end(status, extra); } catch {  }
       };
       const failed = (err: unknown) => {
+        // An HTTP exception a framework answers with (a NestJS NotFoundException, a failed auth check's
+        // 401) is the app's answer to its caller, not a failure of the function: the span keeps the status
+        // it answers with and records no exception, as the request's own span does.
+        let answered: number | undefined;
+        try {
+          answered = httpAnswerStatus(err);
+          if (answered !== undefined && isServerErrorStatus(answered)) answered = undefined;
+        } catch {
+          answered = undefined;
+        }
+        if (answered !== undefined) {
+          safeEnd("OK", { "http.response.status_code": answered });
+          return;
+        }
         recordError(span, err, { escaped: true });
         safeEnd("ERROR");
       };

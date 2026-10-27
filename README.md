@@ -93,9 +93,9 @@ app.use(evalkit.expressMiddleware());
 app.use(evalkit.expressErrorHandler());   // records the error a route passes to next(err), then hands it on
 ```
 
-The adapters are `expressMiddleware()`, `fastifyPlugin()`, `koaMiddleware()`, `honoMiddleware()`, `hapiPlugin()` and `createNestjsInterceptor()`. Each records the error a request fails with on the request's span (see [Errors](#errors)); Express needs `expressErrorHandler()` after the routes for that, since an Express middleware only sees the status code.
+The adapters are `expressMiddleware()`, `fastifyPlugin()`, `koaMiddleware()`, `honoMiddleware()`, `hapiPlugin()` and `createNestjsInterceptor()`. Each records the error a request fails with on the request's span when the answer counts as an error, every 4xx and 5xx by default (see [Which HTTP answers are errors](#which-http-answers-are-errors)); Express needs `expressErrorHandler()` after the routes for that, since an Express middleware only sees the status code.
 
-Health and readiness probes are not traced, by `init()` or by an adapter, and neither is anything their handlers do, so a load balancer polling every few seconds adds no traces. `traceHealthChecks: true` traces them like any request. A probe is a request whose last path segment is `health`, `healthz`, `healthcheck`, `health-check`, `health_check`, `livez`, `readyz` or `startupz`, or whose health segment is followed only by `live`, `liveness`, `ready`, `readiness`, `startup`, `started` or `alive` (`/health/live`, `/actuator/health/readiness`). Segments are matched whole and ignoring case, so `/healthcare` and `/api/health-records` are recorded. Outgoing requests to such paths are not recorded either. The Python SDK decides outgoing requests by the same rule.
+Health and readiness probes are not traced, by `init()` or by an adapter, and neither is anything their handlers do, so a load balancer polling every few seconds adds no traces. `traceHealthChecks: true` traces them like any request. A probe is a request whose last path segment is `health`, `healthz`, `healthcheck`, `health-check`, `health_check`, `livez`, `readyz` or `startupz`, or whose health segment is followed only by `live`, `liveness`, `ready`, `readiness`, `startup`, `started` or `alive` (`/health/live`, `/actuator/health/readiness`). Segments are matched whole and ignoring case, so `/healthcare` and `/api/health-records` are recorded, and a probe never sits under a record: `/datasets/<id>/health` and `/users/42/healthz` (a number, a UUID, a long hex or opaque id, or a route parameter before the health segment) are the app's own routes and are recorded. Outgoing requests to such paths are not recorded either. The Python SDK decides outgoing requests by the same rule.
 
 ### Trace a whole NestJS app
 
@@ -759,6 +759,26 @@ An error is recorded the same way wherever it happens (a traced function, a mode
 
 A frame is in-app unless it is Node's own (`node:`, `internal/`) or a dependency's (`node_modules`). `inAppInclude` and `inAppExclude` (substrings or RegExps) change that, the exclusions winning: `inAppInclude: ["node_modules/@acme/"]` counts your own packages. Frames come from `error.stack`; `Error.prepareStackTrace` is never replaced. `stackTraceLimit` (unset by default) raises `Error.stackTraceLimit` from V8's default of 10 when you want deeper stacks; it is process-wide, so every `Error` your app creates then collects more frames. A limit you set yourself is left alone. `sourceMaps: true` maps frames to your TypeScript sources through `process.setSourceMapsEnabled(true)`. Messages and stacks are scrubbed like every other attribute, the query strings of URLs inside them included.
 
+### Which HTTP answers are errors
+
+By default a request's server span is `ERROR` for every 4xx and 5xx answer, with the exception the request failed with, if any. The Python SDK decides the same way. An outgoing call that gets a 4xx or 5xx back is an error too.
+
+`serverErrorStatusCodes` changes which answers are errors, with codes (`503`) and inclusive ranges (`"500-599"`). `["500-599"]` follows OpenTelemetry's HTTP conventions, where a 4xx is the caller's mistake (a scanner probing `/.env`, an expired token, a body that fails validation): its span keeps `http.status_code`, stays `OK` and records no exception, so the failures your app has to fix are not buried under its callers'. A public API that bots probe is a good case for it:
+
+```ts
+evalkit.init({
+  subscriptionKey: process.env.EVALKIT_SUBSCRIPTION_KEY!,
+  serverErrorStatusCodes: ["500-599"],          // a 4xx is the caller's, not an error
+  // serverErrorStatusCodes: [429, "500-599"],  // ... except the 429s you answer
+});
+```
+
+A traced function, a NestJS method traced by `enableNestjsAutoTrace()` included, that throws an exception a framework answers a request with (a NestJS `HttpException` such as `NotFoundException`, a Hono `HTTPException`, a hapi Boom error, an http-errors error from Koa's `ctx.throw(404)` or Express's `createError(401)`) is judged by the status it carries, records it as `http.response.status_code`, and ends `OK` with no exception when that status is not in the list; the exception still reaches the caller unchanged. The setting never applies to outgoing calls: an error from a call that got a 404 back always fails the span.
+
+An invalid list (a code outside 100 to 599, a range written backwards) leaves tracing off with one warning, as any invalid option does.
+
+### Recording errors yourself
+
 Record an error you handled yourself, and group errors your way:
 
 ```ts
@@ -956,6 +976,7 @@ evalkit.getStats();
 | `exportGzip` | Gzip each export request. On by default. A receiver that refuses compressed requests is sent uncompressed ones from then on |
 | `ignoreRoutes` / `ignoreUrls` / `ignoreFunctions` | Inbound routes, outgoing URLs and function names kept out of traces, see [Keeping things out of traces](#keeping-things-out-of-traces) |
 | `traceHealthChecks` | Trace health and readiness probes like any request. Off by default |
+| `serverErrorStatusCodes` | The answers that make a request's span an error: codes and ranges, `["400-599"]` by default, see [Which HTTP answers are errors](#which-http-answers-are-errors) |
 
 The exported `EvalKitOptions` type has the full set, including `appVersion`, `deviceId`, `debug` and the batch settings.
 

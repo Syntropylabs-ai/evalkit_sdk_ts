@@ -26,11 +26,13 @@ init({ subscriptionKey: 'test', baseUrl: 'http://localhost:9', serviceName: 'hea
 const PROBES = [
   '/health', '/healthz', '/health/', '/health/live', '/health/ready', '/readyz', '/livez', '/startupz',
   '/actuator/health', '/actuator/health/liveness', '/v1/healthcheck?verbose=1', '/HEALTHZ', '/health-check',
-  '/health_check', '/health?probe=k8s',
+  '/health_check', '/health?probe=k8s', '/api/v2/health', '/services/billing/healthz',
 ];
 const APP_PATHS = [
   '/healthcare', '/api/health-records', '/healthcare/claims', '/patients/7/health/records',
   '/v1/orders?next=/health', '/wealth', '/health/records',
+  '/datasets/6650a1b2c3d4e5f601234567/health', '/datasets/:datasetId/health', '/users/42/healthz',
+  '/runs/0b6f6a52-6d0e-4b0c-9a51-3f1f3d4b2a10/health/ready',
 ];
 
 const H = { continue: Symbol('continue') };

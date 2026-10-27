@@ -1,6 +1,7 @@
 import type { ConsoleSpanLevel, EvalKitOptions } from "./types.js";
 import { envFlag } from "./redact.js";
 import { sdkLog } from "./diagnostics.js";
+import { serverErrorStatusProblem } from "./http-status.js";
 
 export const CONSOLE_SPAN_LEVELS: readonly ConsoleSpanLevel[] = ["info", "warn", "error", "none"];
 
@@ -93,6 +94,10 @@ export function validateOptions(options: unknown): string[] {
   }
   for (const name of ["inAppInclude", "inAppExclude"] as const) {
     if (o[name] !== undefined && !Array.isArray(o[name])) problems.push(`${name} must be an array of strings or RegExps`);
+  }
+  if (o.serverErrorStatusCodes !== undefined) {
+    const problem = serverErrorStatusProblem(o.serverErrorStatusCodes);
+    if (problem) problems.push(problem);
   }
   return problems;
 }

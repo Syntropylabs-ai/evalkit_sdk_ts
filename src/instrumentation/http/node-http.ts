@@ -7,7 +7,8 @@ import type { EvalKitClient } from '../../core/client.js';
 import { requireBuiltin } from '../../utils/dynimport.js';
 import { sanitizeHeaders } from '../../utils/headers.js';
 import { _evalkitAxiosSpanMap } from '../../utils/axios-span-map.js';
-import { clientSpanName, markServerSpan, serverName, serverRoute } from '../../utils/http-route.js';
+import { clientSpanName, markServerSpan, serverError, serverName, serverRoute } from '../../utils/http-route.js';
+import { isServerErrorStatus } from '../../core/http-status.js';
 import { isIgnoredRequest, isIgnoredUrl } from '../../core/ignore.js';
 import { suppressedContext, tracingSuppressed } from '../../core/suppress.js';
 import { claimPatch } from '../_patched.js';
@@ -339,9 +340,13 @@ function patchServerPrototype(client: EvalKitClient, proto: http.Server): void {
           }
           if (err) {
             recordError(span, err, { escaped: false });
-          } else if (!hasRecordedError(span)) {
-            // An error a framework adapter recorded keeps its description.
-            span.setStatus({ code: res.statusCode >= 400 ? SpanStatusCode.ERROR : SpanStatusCode.OK });
+          } else {
+            // A server span fails for an answer in serverErrorStatusCodes only; any other records no exception.
+            const failed = isServerErrorStatus(res.statusCode);
+            const handlerError = failed ? serverError(req) : undefined;
+            if (handlerError !== undefined) recordError(span, handlerError, { escaped: false });
+            // An error recorded on the span keeps its description.
+            if (!hasRecordedError(span)) span.setStatus({ code: failed ? SpanStatusCode.ERROR : SpanStatusCode.OK });
           }
           span.end();
         } catch {  }

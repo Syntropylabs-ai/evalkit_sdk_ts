@@ -134,6 +134,8 @@ import { createNestjsInterceptor } from "syntropylabs-evalkit";
 app.useGlobalInterceptors(createNestjsInterceptor());
 ```
 
+A request's span is `ERROR` for every 4xx and 5xx answer by default, with the exception that caused it. `serverErrorStatusCodes: ["500-599"]` in `init()` follows OpenTelemetry's HTTP conventions instead: a 4xx answer (a 404, a 401, a failed validation) keeps its status code on an `OK` span with no exception. Outgoing calls always count a 4xx as an error.
+
 ## 7. Manual tracing
 
 Use these for explicit spans around code that automatic tracing does not cover.
