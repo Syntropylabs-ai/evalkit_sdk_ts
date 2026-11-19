@@ -167,9 +167,18 @@ function decodeQueryKey(key: string): string {
   }
 }
 
+// Rails, Laravel and PHP name a form's nested fields with brackets (user[password], items[0][api_key]): each
+// bracketed part is a field name of its own.
+const BRACKET_PARTS_RE = /[^[\]]+/g;
+
+function isSecretQueryName(name: string): boolean {
+  return isSecretKey(name, true) || SECRET_QUERY_KEY_RE.test(name);
+}
+
 export function isSecretQueryKey(key: string): boolean {
   const decoded = decodeQueryKey(key);
-  return isSecretKey(decoded, true) || SECRET_QUERY_KEY_RE.test(decoded);
+  if (isSecretQueryName(decoded)) return true;
+  return decoded.includes("[") && (decoded.match(BRACKET_PARTS_RE) ?? []).some(isSecretQueryName);
 }
 
 export function isUrl(value: string): boolean {
@@ -269,8 +278,15 @@ export function scrubUrl(value: string): string {
   return scrubString(out);
 }
 
+// A form-encoded body (`username=alice&password=...`), as a login form or an OAuth token request
+// sends it: its secret-named fields are masked as a query string's are. The separators are outside
+// both classes, so a match is linear in the length.
+const FORM_BODY_RE = /^[^=&\s]+=[^&\s]*(?:&[^=&\s]+=[^&\s]*)*$/;
+
 function scrubText(value: string): string {
-  return isUrl(value) ? scrubUrl(value) : scrubString(value);
+  if (isUrl(value)) return scrubUrl(value);
+  if (FORM_BODY_RE.test(value)) return scrubString(scrubQuery(value));
+  return scrubString(value);
 }
 
 function scrubJsonString(value: string, headerLike: boolean, depth: number): string | undefined {

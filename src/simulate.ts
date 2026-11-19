@@ -1,6 +1,7 @@
 import { context as otelContext } from "@opentelemetry/api";
 import { randomBytes } from "node:crypto";
 import type { EvalKitClient } from "./core/client.js";
+import { fetchSameOrigin } from "./core/same-origin-fetch.js";
 import { simByTraceId, simToolCallsByTraceId } from "./core/simulation.js";
 import { evaluate } from "./evaluate.js";
 import { Conversation, wantsLiveUser, type EndedBy, type SimulatedUserUsageTotals } from "./live-user.js";
@@ -176,7 +177,7 @@ export async function generateScenarios(
   if (opts.maxCompletionTokens !== undefined) body.maxCompletionTokens = opts.maxCompletionTokens;
   if (opts.maxTokens !== undefined) body.maxTokens = opts.maxTokens;
 
-  const res = await fetch(base + "/scenarios/generate", {
+  const res = await fetchSameOrigin(base + "/scenarios/generate", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -326,7 +327,7 @@ export async function evaluateSimulation(
   if (opts.runId !== undefined) body.runId = opts.runId;
   if (opts.maxTokens !== undefined) body.maxTokens = opts.maxTokens;
 
-  const res = await fetch(base + "/simulations/evaluate", {
+  const res = await fetchSameOrigin(base + "/simulations/evaluate", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

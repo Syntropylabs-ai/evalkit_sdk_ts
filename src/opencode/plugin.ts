@@ -1,5 +1,5 @@
 export const PLUGIN_FILE_NAME = "evalkit.ts";
-export const PLUGIN_SOURCE_SHA256 = "267a60805676420c36434e88016226a43983e11cca2ee24575f73483070b42c3";
+export const PLUGIN_SOURCE_SHA256 = "bd78f30b8a4d06868ab84a0b45115a273d4c6c855bb023a3a1a4e3c9416ded7e";
 export const OPENCODE_PLUGIN_SOURCE = `import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -86,6 +86,8 @@ async function post(signal, body) {
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + cfg.key },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(4000),
+      // The key goes only to the endpoint it was stored for: a redirect anywhere else is not followed.
+      redirect: "error",
     });
   } catch {
     return;

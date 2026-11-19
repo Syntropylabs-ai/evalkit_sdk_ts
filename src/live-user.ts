@@ -1,5 +1,6 @@
 import { context as otelContext } from "@opentelemetry/api";
 import type { EvalKitClient } from "./core/client.js";
+import { fetchSameOrigin } from "./core/same-origin-fetch.js";
 
 /**
  * The simulated user that plays a scenario's turns after its scripted ones.
@@ -224,7 +225,7 @@ export class Conversation {
     try {
       // Inside the user span, so the request's own trace events land on it rather than on the scenario.
       const res = await otelContext.with(span.ctx, () =>
-        fetch(base + "/simulations/user-turn", {
+        fetchSameOrigin(base + "/simulations/user-turn", {
           method: "POST",
           headers: { "Content-Type": "application/json", "X-Subscription-Key": this.client.options.subscriptionKey },
           body: JSON.stringify(body),

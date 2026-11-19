@@ -547,7 +547,7 @@ await Eval({ name: "support-golden", data: rows, evaluators: [RULE_ID], hyperpar
 
 | API | What it does |
 |---|---|
-| `evalkit.prompts.get(name, { label?, version?, variables?, apiUrl?, cacheTtlMs?, timeoutMs? })` | Resolves `version`, else `label`, else `production`, else the latest version. Passing both `version` and `label` throws. With `variables`, the server compiles the prompt, and local compilation is the fallback |
+| `evalkit.prompts.get(name, { label?, version?, variables?, apiUrl?, cacheTtlMs?, timeoutMs?, staleIfErrorMs? })` | Resolves `version`, else `label`, else `production`, else the latest version. Passing both `version` and `label` throws. With `variables`, the server compiles the prompt, and local compilation is the fallback. Calls for one prompt that arrive while it is being fetched share that fetch. When a refresh gets no answer, a 408, a 429 or a 5xx, the cached copy is served (with a warning) for up to `staleIfErrorMs` past its TTL, 24 hours by default, and the next try is 10 s later; 0 raises instead. A refusal (401, 403, 404, 400) is always raised |
 | `prompt.template`, `prompt.variables`, `prompt.config`, `prompt.semver`, `prompt.labels` | What the registry stores |
 | `prompt.compile(variables)` | Local Mustache-style substitution. If variables are missing, it throws one error that names all of them |
 | `withPrompt(prompt, fn)` | Every `llm_call` span started inside `fn` carries `prompt.ref` (`name@version`), `prompt.name` and `prompt.version`. Attributes you set yourself win. `evalkit.prompts.current()` reads the active ref |
@@ -645,17 +645,18 @@ Each scenario is its own trace, with a root span named `scenario:<name>`, and is
 
 ## Coding agents
 
-The package ships an `evalkit` command (`npx evalkit …`) that points the telemetry of a coding agent at your EvalKit Environment. It supports Claude Code, Codex, Gemini CLI, Cursor, Windsurf and OpenCode. Each session then shows up as one trace per turn, covering the main agent, every subagent and everything they did. The `coding` commands import nothing from the tracing runtime. Only `evalkit eval` loads the SDK, and only when it runs.
+The package ships an `evalkit` command that points the telemetry of a coding agent at your EvalKit Environment. Install it globally (`npm install -g syntropylabs-evalkit`) before `coding install`: the hooks it writes for Claude Code, Cursor and Windsurf run the command from where it is installed, so from npx's cache, which npm prunes, they would stop one day (the install warns). For a one-off command without an install, name the package: `npx -y -p syntropylabs-evalkit evalkit coding status` (on npm, `evalkit` alone is another package). It supports Claude Code, Codex, Gemini CLI, Cursor, Windsurf and OpenCode. Each session then shows up as one trace per turn, covering the main agent, every subagent and everything they did. The `coding` commands import nothing from the tracing runtime. Only `evalkit eval` loads the SDK, and only when it runs.
 
 ```bash
-npx evalkit coding install --vendor claude-code --key tk_live_...
-npx evalkit coding install --vendor codex --key tk_live_...
-npx evalkit coding install --vendor gemini-cli --key tk_live_... --capture full
-npx evalkit coding install --vendor cursor --key tk_live_... --scope project
-npx evalkit coding install --vendor opencode --key tk_live_...
-npx evalkit coding status
-npx evalkit coding doctor
-npx evalkit coding uninstall --vendor codex
+npm install -g syntropylabs-evalkit
+evalkit coding install --vendor claude-code --key tk_live_...
+evalkit coding install --vendor codex --key tk_live_...
+evalkit coding install --vendor gemini-cli --key tk_live_... --capture full
+evalkit coding install --vendor cursor --key tk_live_... --scope project
+evalkit coding install --vendor opencode --key tk_live_...
+evalkit coding status
+evalkit coding doctor
+evalkit coding uninstall --vendor codex
 ```
 
 | Flag | Effect |
@@ -708,7 +709,7 @@ The data comes from Gemini CLI's native spans, whose `gen_ai.operation.name` is 
 
 #### Cursor
 
-`install` adds 12 hook entries (`npx evalkit coding hook --vendor cursor --event …`, with a 5 s timeout) to `~/.cursor/hooks.json` and leaves other hooks alone.
+`install` adds 12 hook entries (`<node> <path of bin/evalkit.js> coding hook --vendor cursor --event …`, with a 5 s timeout) to `~/.cursor/hooks.json` and leaves other hooks alone.
 
 Cursor has no telemetry export, so the hook builds the trace itself, with ids derived like this:
 
@@ -737,7 +738,7 @@ The plugin turns `session.*`, `message.updated`, `message.part.updated` and `too
 
 `doctor` posts one synthetic turn: an `agent` root with an `llm_call` child and a `tool_call` child, plus one enrichment record. It then reads `GET <api>/v1/traces/<tenant>/<traceId>` back with the same key and checks that the merged tree came back, with 3 spans and the prompt present.
 
-The read API scopes traces by tenant. Without `--tenant`, the tenant in the path is `me`, which receivers from 2026-09-15 on resolve to the key's tenant, so a plain `npx evalkit coding doctor` works against a current receiver. Pass `--tenant`, which is remembered in `config.env`, only against an older receiver. An older receiver answers the `me` read with 403, and `doctor` reports `read back forbidden at <url>: this receiver predates the 'me' alias; pass --tenant <your tenant id> or update the receiver`.
+The read API scopes traces by tenant. Without `--tenant`, the tenant in the path is `me`, which receivers from 2026-09-15 on resolve to the key's tenant, so a plain `evalkit coding doctor` works against a current receiver. Pass `--tenant`, which is remembered in `config.env`, only against an older receiver. An older receiver answers the `me` read with 403, and `doctor` reports `read back forbidden at <url>: this receiver predates the 'me' alias; pass --tenant <your tenant id> or update the receiver`.
 
 A `--tenant` that the key does not belong to reports `read back forbidden at <url>: the key belongs to a different tenant than '<tenant>'`, and any other failed read ends with `… at <url>`. The URL in the message is the one that was read, and the `→ exporter <endpoint>` after it is the ingest endpoint.
 
@@ -952,6 +953,10 @@ evalkit.getStats();
 ```
 
 `init()` never throws. Options that cannot work (no key, a malformed URL, a negative number) leave the SDK off with one warning, and your app runs as without it. `EVALKIT_DISABLED=true`, or OpenTelemetry's `OTEL_SDK_DISABLED=true`, turns it off on purpose: nothing is patched and nothing is sent. Calling `init()` again replaces the options, with a warning naming the ones that changed.
+
+### Redirects keep the key
+
+Every call the SDK and the `evalkit` CLI make with your key (span export, `prompts.get()`, `feedback()`, `Eval()`, the simulation calls, the CLI's OTLP and eval commands) follows a redirect only within the same origin, or from http to https on the same host. A redirect anywhere else ends the call with its own 30x status and the message `refused a redirect to <origin>: ...`, so neither the key nor a request body reaches a server a redirect names.
 
 ## Configuration
 
