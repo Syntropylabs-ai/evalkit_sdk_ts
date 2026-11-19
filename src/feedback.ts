@@ -1,4 +1,5 @@
 import type { EvalKitClient } from "./core/client.js";
+import { fetchSameOrigin } from "./core/same-origin-fetch.js";
 
 export type FeedbackKind = "thumbs" | "rating" | "reward" | "text";
 
@@ -49,7 +50,7 @@ export async function feedback(client: EvalKitClient, opts: FeedbackOptions): Pr
   if (opts.userId !== undefined) body.userId = opts.userId;
   if (opts.name !== undefined) body.name = opts.name;
 
-  const res = await fetch(base + "/v1/feedback", {
+  const res = await fetchSameOrigin(base + "/v1/feedback", {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Subscription-Key": client.options.subscriptionKey },
     body: JSON.stringify(body),

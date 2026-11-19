@@ -15,6 +15,7 @@ import type { GatedExporter } from "./batch-processor.js";
 import { TRUNCATED_PREFIX, cutMiddle, utf8Length, valueLimitBytes } from "./truncate.js";
 import { EXCEPTION_EVENT, normaliseExceptionEvent } from "./exceptions.js";
 import { swallow } from "./guard.js";
+import { fetchSameOrigin } from "./same-origin-fetch.js";
 
 const AUTH_FAIL_LIMIT = 3;
 
@@ -602,7 +603,7 @@ export class EvalKitExporter implements GatedExporter {
       const timeout = Math.min(ATTEMPT_TIMEOUT_MS, Math.max(MIN_ATTEMPT_TIMEOUT_MS, deadline - this.clock()));
       const attemptTimer = attemptSignal(timeout, this.cycle?.signal);
       try {
-        const res = await fetch(url, attemptTimer.signal ? { ...init, signal: attemptTimer.signal } : init);
+        const res = await fetchSameOrigin(url, attemptTimer.signal ? { ...init, signal: attemptTimer.signal } : init);
 
         if (!isRetryableStatus(res.status)) return res;
         this.attemptFailed = true;

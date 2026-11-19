@@ -76,7 +76,7 @@ function definedIdentity(options: Identity): Identity {
   return out;
 }
 
-export const SDK_VERSION = "0.3.7";
+export const SDK_VERSION = "0.3.8";
 
 /** How long flush() waits by default before it resolves false; the export itself goes on in the background. */
 export const DEFAULT_FLUSH_TIMEOUT_MS = 5000;

@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { hookEvents, main } from '../dist/cli/index.js';
+import { hookEvents, main, runsFromNpxCache } from '../dist/cli/index.js';
 
 const KEY = 'tk_live_0123456789abcdef0123456789abcdef';
 const fail = (m) => { console.error('FAIL:', m); process.exit(1); };
@@ -418,6 +418,23 @@ function runBin(args, input, env) {
   assert.strictEqual(r.code, 1, r.out);
   assert.strictEqual(readFileSync(settings, 'utf8'), refused);
   rmSync(home, { recursive: true, force: true });
+}
+
+{
+  // A hook names the file it runs: from npx's cache, which npm prunes, the install warns.
+  const npxBinary = '/usr/bin/node /home/u/.npm/_npx/0a1b2c/node_modules/syntropylabs-evalkit/bin/evalkit.js';
+  assert.strictEqual(runsFromNpxCache(npxBinary), true);
+  assert.strictEqual(runsFromNpxCache('C:\\Users\\u\\AppData\\Local\\npm-cache\\_npx\\0a1b\\node_modules\\syntropylabs-evalkit\\bin\\evalkit.js'), true);
+  assert.strictEqual(runsFromNpxCache('/usr/bin/node /usr/lib/node_modules/syntropylabs-evalkit/bin/evalkit.js'), false);
+  assert.strictEqual(runsFromNpxCache(undefined), false);
+  for (const [vendor, warned] of [['claude-code', true], ['codex', false]]) {
+    const home = tmpHome();
+    const out = [], err = [];
+    const code = await main(['coding', 'install', '--vendor', vendor, '--key', KEY, '--dry-run'], { out: (l) => out.push(l), err: (l) => err.push(l), home, binary: npxBinary });
+    assert.strictEqual(code, 0, err.join('\n'));
+    assert.strictEqual(err.some((l) => l.includes("npx's cache") && l.includes('npm install -g syntropylabs-evalkit')), warned, `${vendor}: ${err.join('\n')}`);
+    rmSync(home, { recursive: true, force: true });
+  }
 }
 
 console.log('coding-cli.e2e OK');

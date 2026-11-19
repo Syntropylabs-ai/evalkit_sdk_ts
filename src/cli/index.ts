@@ -14,6 +14,12 @@ export type { GateCheck, GateResult, RunReport, SdkModule, Verdict } from "./eva
 
 const HOOK_VENDORS = ["claude-code", "cursor", "windsurf"] as const;
 
+/** True when this command runs from npx's cache. A hook names the file it runs, and npm prunes that
+ *  cache, so hooks written from there stop starting one day with nothing visible. */
+export function runsFromNpxCache(binary: string | undefined): boolean {
+  return !!binary && /[\\/]_npx[\\/]/.test(binary);
+}
+
 interface Parsed {
   positional: string[];
   flags: Record<string, string | boolean>;
@@ -128,6 +134,12 @@ async function install(flags: Parsed["flags"], io: CliIo, store: ConfigStore): P
     cwd: io.cwd ?? process.cwd(),
   };
   const installer = installerFor(vendor, store.home, io.binary ?? "evalkit");
+  if ((HOOK_VENDORS as readonly string[]).includes(vendor) && runsFromNpxCache(io.binary)) {
+    io.err(
+      `warning: this evalkit runs from npx's cache, and ${vendor}'s hooks will run it from there; npm may prune that folder, and the hooks then stop. ` +
+        "Install it with npm install -g syntropylabs-evalkit, then run evalkit coding install again.",
+    );
+  }
   if (flags.managed === true && installer instanceof ClaudeCodeInstaller) {
     io.out(JSON.stringify(installer.managedSnippet(cfg, opts), null, 2));
     return 0;

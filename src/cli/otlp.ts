@@ -1,3 +1,5 @@
+import { fetchSameOrigin } from "../core/same-origin-fetch.js";
+
 const MAX_ATTR = 4096;
 
 export interface OtlpAttribute {
@@ -49,7 +51,7 @@ export interface SendResult {
 
 export async function send(endpoint: string, key: string, signal: string, record: Record<string, unknown>, timeoutMs = 4000): Promise<SendResult> {
   try {
-    const res = await fetch(`${baseUrl(endpoint)}/v1/${signal}`, {
+    const res = await fetchSameOrigin(`${baseUrl(endpoint)}/v1/${signal}`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
       body: JSON.stringify(record),
@@ -77,7 +79,7 @@ export interface FetchResult {
 
 export async function getJson(url: string, key: string, timeoutMs = 8000): Promise<FetchResult> {
   try {
-    const res = await fetch(url, {
+    const res = await fetchSameOrigin(url, {
       headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
       signal: AbortSignal.timeout(timeoutMs),
     });

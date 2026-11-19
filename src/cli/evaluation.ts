@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, extname, isAbsolute, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { fetchSameOrigin } from "../core/same-origin-fetch.js";
 import { ConfigStore } from "./config.js";
 import { readBase } from "./otlp.js";
 
@@ -299,7 +300,7 @@ export async function gateEval(runId: string, flags: EvalFlags, io: EvalCliIo): 
   const url = `${resolveApiUrl(flags.apiUrl, store)}/evaluation-runs/${encodeURIComponent(runId)}`;
   let body: unknown;
   try {
-    const res = await fetch(url, { headers: { "X-Subscription-Key": key, Accept: "application/json" }, signal: AbortSignal.timeout(30_000) });
+    const res = await fetchSameOrigin(url, { headers: { "X-Subscription-Key": key, Accept: "application/json" }, signal: AbortSignal.timeout(30_000) });
     const text = await res.text();
     if (!res.ok) {
       const hint = res.status === 404 ? " (no such run, or this server has no GET /evaluation-runs/:runId yet)" : "";

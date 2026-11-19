@@ -1,4 +1,5 @@
 import type { EvalKitClient } from "./core/client.js";
+import { fetchSameOrigin } from "./core/same-origin-fetch.js";
 
 const RULE_ID = /^[0-9a-fA-F]{24}$/;
 const COUNT_KEYS = ["ok", "unparseable", "judgeError", "skipped", "unsupported"] as const;
@@ -486,7 +487,7 @@ class RunApi {
   ) {}
 
   async post(path: string, body: Record<string, unknown>): Promise<PostResult> {
-    const res = await fetch(this.base + path, {
+    const res = await fetchSameOrigin(this.base + path, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Subscription-Key": this.client.options.subscriptionKey },
       body: JSON.stringify(body),

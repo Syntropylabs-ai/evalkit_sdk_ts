@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.8 — unreleased
+
+### Security
+- The SDK's own calls (span export, `prompts.get()`, `feedback()`, `Eval()`, `generateScenarios()`,
+  `evaluateSimulation()`, the simulated user, and the `evalkit` CLI's OTLP and eval commands) follow a
+  redirect only within the same origin, or from http to https on the same host. fetch followed any redirect
+  with the subscription key, and on a 307 or 308 with the body, so a misconfigured proxy or a compromised
+  host could send both to a server of its choosing. A redirect anywhere else now ends the call with its own
+  status and the message `refused a redirect to <origin>: ...`. The OpenCode plugin that
+  `evalkit coding install` writes refuses every redirect (run `coding install --vendor opencode` again to
+  update an installed one).
+- A form-encoded body (`username=alice&password=...`, an OAuth `client_secret=...` token request) has
+  its secret-named fields masked, as a query string's are, bracketed names included (`user[password]`,
+  `user%5Bpassword%5D`, as Rails, Laravel and PHP forms send them). Captured login and token request bodies
+  were exported with the password or client secret in clear.
+
+### Fixed
+- `prompts.get()` serves the copy it has cached when a refresh gets no answer, a 408, a 429 or a 5xx, for
+  up to `staleIfErrorMs` (24 hours by default; 0 raises instead) past `cacheTtlMs`, warns once per failed
+  refresh, and tries again after 10 seconds. A refusal (401, 403, 404, 400) is still raised. Calls for one
+  prompt that arrive while it is being fetched wait for that fetch instead of each sending their own.
+- `evalkit coding install` warns when it runs from npx's cache: the hooks it writes for Claude Code, Cursor
+  and Windsurf run the command from where it is installed, and npm prunes that cache. Install it with
+  `npm install -g syntropylabs-evalkit` first; the README's commands do.
+
 ## 0.3.7 — 2026-10-27
 
 Every server integration now decides which answers make a request's span an error by one rule, and the
