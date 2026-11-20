@@ -16,6 +16,11 @@
   `user%5Bpassword%5D`, as Rails, Laravel and PHP forms send them). Captured login and token request bodies
   were exported with the password or client secret in clear.
 
+### Changed
+- The README's `evalkit eval` commands for CI name the package, `npx -y -p syntropylabs-evalkit evalkit
+  eval run ...`: in a repository that does not depend on this SDK, a bare `npx evalkit` fetches and runs
+  an unrelated npm package called `evalkit`, with the key in its environment.
+
 ### Fixed
 - `prompts.get()` serves the copy it has cached when a refresh gets no answer, a 408, a 429 or a 5xx, for
   up to `staleIfErrorMs` (24 hours by default; 0 raises instead) past `cacheTtlMs`, warns once per failed

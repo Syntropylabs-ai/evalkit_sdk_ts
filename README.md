@@ -459,15 +459,15 @@ The other options are `judgeModelConfigId`, `timeoutMs` (600 s per request by de
 
 A deployment older than the append endpoints answers 404 on `POST /evaluation-runs/{runId}/rows`. The SDK then falls back to the earlier single-call behavior: one job per batch (`result.jobIds`), aggregates rolled up on the client, and `gateResult` and `comparison` set to `null` when there is more than one batch. The fallback is detected once per client, not once per batch. A 400 or 404 from `POST /evaluation-runs` itself, such as a validation error or an evaluator id that does not exist, is thrown as `Eval failed <status>: <the server's reason>` and is never mistaken for an old server. A run with `collections` never falls back, because the old endpoint cannot carry them.
 
-### CI: `npx evalkit eval`
+### CI: `evalkit eval`
 
-The same run from the command line, with the verdict as the exit code, so a pipeline step fails both when the gate fails and when the gate cannot be decided.
+The same run from the command line, with the verdict as the exit code, so a pipeline step fails both when the gate fails and when the gate cannot be decided. The commands name the package (`-p syntropylabs-evalkit`), because on npm a bare `npx evalkit` in a project that does not depend on this SDK fetches and runs an unrelated package called `evalkit`, with your key in its environment. In a project that has `syntropylabs-evalkit` in its dependencies, npx runs that installed copy.
 
 ```bash
-npx evalkit eval run eval.json                      # a JSON config
-npx evalkit eval run evals/checkout.mjs             # a module: default export = Eval options
-npx evalkit eval run evals/checkout.mjs --export smoke --json
-npx evalkit eval gate <runId>                       # re-read the gate of a run made elsewhere
+npx -y -p syntropylabs-evalkit evalkit eval run eval.json             # a JSON config
+npx -y -p syntropylabs-evalkit evalkit eval run evals/checkout.mjs    # a module: default export = Eval options
+npx -y -p syntropylabs-evalkit evalkit eval run evals/checkout.mjs --export smoke --json
+npx -y -p syntropylabs-evalkit evalkit eval gate <runId>              # re-read the gate of a run made elsewhere
 ```
 
 | Exit | Meaning |
@@ -501,7 +501,7 @@ The key comes from `--key`, else `EVALKIT_API_KEY`, else the config that `evalki
 The command prints the run link, the pass rate and average score, the average per metric, one table row per gate check (name, threshold, actual, and passed, failed or undecided), and the verdict with its exit code. `--json` prints one object instead, `{ runId, jobId, url, name, totalRows, erroredRows, indeterminateRows, passRate, averageScore, overallScores, gate: { passed, checks, evaluatedAt }, verdict }`, which you can paste into a job summary or parse with `jq`.
 
 ```yaml
-- run: npx evalkit eval run eval.json --json > eval-result.json
+- run: npx -y -p syntropylabs-evalkit evalkit eval run eval.json --json > eval-result.json
   env:
     EVALKIT_API_KEY: ${{ secrets.EVALKIT_API_KEY }}
 ```
